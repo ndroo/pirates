@@ -121,6 +121,27 @@ console.log('player names in roster ✓');
 await hold(host2, 'Digit1'); // small ships sink fast
 await hold(guest3, 'Digit1');
 await host2.waitForTimeout(500);
+
+// Islands: same layout on both screens.
+const hostIslands = await host2.evaluate(() => window.__game.islands);
+const guestIslands = await guest3.evaluate(() => window.__game.islands);
+if (!hostIslands.length || JSON.stringify(hostIslands) !== JSON.stringify(guestIslands)) {
+  throw new Error(`island mismatch: host ${JSON.stringify(hostIslands)} guest ${JSON.stringify(guestIslands)}`);
+}
+console.log(`islands synced (${hostIslands.length}) ✓`);
+
+// Running aground must sink the ship on the spot (and respawn it, in this mode).
+await host2.evaluate(() => {
+  const g = window.__game;
+  const isl = g.islands[0];
+  const ship = g.slots[0].ship;
+  ship.x = isl.x;
+  ship.y = isl.y;
+});
+await host2.waitForFunction(() => !window.__game.slots[0].ship.alive, null, { timeout: 5000 });
+await host2.waitForFunction(() => window.__game.slots[0].ship.alive, null, { timeout: 15000 });
+console.log('ship sank on island and respawned ✓');
+
 await host2.keyboard.down('Space'); // both auto-aim and blast away
 await guest3.keyboard.down('Space');
 
@@ -132,9 +153,17 @@ for (let i = 0; i < 10 && !scored; i++) {
     const g = window.__game;
     const [a, b] = [g.slots[0].ship, g.slots[1].ship];
     // Same heading = zero relative velocity, so the broadsides can't miss.
+    // Pick a lane of open water so neither ship runs aground mid-volley.
     if (a?.alive && b?.alive) {
-      a.x = 400; a.y = 320; a.heading = 0;
-      b.x = 400; b.y = 400; b.heading = 0;
+      const clear = (x, y) => g.islands.every((i) => Math.hypot(x - i.x, y - i.y) > i.r + 80);
+      let y = 150;
+      for (; y < 560; y += 25) {
+        let ok = true;
+        for (let x = 320; x <= 700; x += 40) ok = ok && clear(x, y) && clear(x, y + 80);
+        if (ok) break;
+      }
+      a.x = 400; a.y = y; a.heading = 0;
+      b.x = 400; b.y = y + 80; b.heading = 0;
     }
   });
   scored = await host2

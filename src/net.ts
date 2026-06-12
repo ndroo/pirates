@@ -25,6 +25,13 @@ export interface ShipSpawn {
   heading: number;
 }
 
+/** A round island hazard: ships that hit it sink, cannonballs splash on it. */
+export interface Island {
+  x: number;
+  y: number;
+  r: number;
+}
+
 /** Trim and bound a player-supplied name; '' means "use the default label". */
 export function cleanName(raw: unknown): string {
   return String(raw ?? '').replace(/\s+/g, ' ').trim().slice(0, 14);
@@ -48,7 +55,7 @@ export type NetMessage =
   | { t: 'rules'; mode: BattleMode; target: number } // host changed the rules
   | { t: 'kicked' }
   | { t: 'picked'; ready: number; total: number }
-  | { t: 'start'; mode: BattleMode; target: number; ships: ShipSpawn[] }
+  | { t: 'start'; mode: BattleMode; target: number; ships: ShipSpawn[]; islands: Island[] }
   | {
       t: 'state';
       ships: ShipSnap[];

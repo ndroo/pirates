@@ -2,7 +2,7 @@ import { decideTurn, wantsToFire } from './ai';
 import { Cannonball, drawCannonball } from './cannonball';
 import { Explosion } from './explosion';
 import type { Input } from './input';
-import type { BattleMode, GuestNet, HostNet, NetMessage, ShipSnap } from './net';
+import type { BattleMode, GuestNet, HostNet, Island, NetMessage, ShipSnap } from './net';
 import { Ship, SHIP_TYPES, type ShipTypeName, type Turn } from './ship';
 
 // Fixed logical arena so all players see the same battlefield; the canvas is
@@ -15,6 +15,8 @@ const PLAYER_RELOAD = 1.4; // s between broadsides
 const AI_RELOAD = 2.2; // the AI aims perfectly, so it reloads slower
 const RESPAWN_DELAY = 3; // s between fully sinking and reappearing
 const SINK_TARGET = 5; // respawn mode: sinks needed to win the round
+const MIN_ISLANDS = 3;
+const MAX_ISLANDS = 6;
 
 // One distinct hull color per player slot (host is 0).
 export const PLAYER_COLORS = [
@@ -87,6 +89,7 @@ export class Game {
   private myPick: ShipTypeName | null = null;
   private cannonballs: Cannonball[] = [];
   private explosions: Explosion[] = [];
+  private islands: Island[] = [];
   private waves: Wave[] = [];
   private lastTime = 0;
 
@@ -226,6 +229,7 @@ export class Game {
           slot.ship = new Ship(sp.x, sp.y, sp.heading, slot.color, sp.type);
           return slot;
         });
+        this.islands = msg.islands;
         this.cannonballs = [];
         this.remoteBalls = [];
         this.explosions = [];
@@ -301,6 +305,30 @@ export class Game {
     slot.respawnIn = null;
   }
 
+  /**
+   * Scatter islands inside the spawn ring — well clear of the ring itself,
+   * so initial spawns and respawns always land on open water.
+   */
+  private makeIslands(): Island[] {
+    const islands: Island[] = [];
+    const count = MIN_ISLANDS + Math.floor(Math.random() * (MAX_ISLANDS - MIN_ISLANDS + 1));
+    for (let tries = 0; islands.length < count && tries < 200; tries++) {
+      const r = 25 + Math.random() * 30;
+      const angle = Math.random() * Math.PI * 2;
+      const f = Math.sqrt(Math.random()) * 0.6; // stay inside 60% of the ring
+      const candidate = {
+        x: WORLD_W / 2 + Math.cos(angle) * WORLD_W * 0.32 * f,
+        y: WORLD_H / 2 + Math.sin(angle) * WORLD_H * 0.32 * f,
+        r,
+      };
+      // Leave sailing channels between islands.
+      if (islands.every((i) => Math.hypot(i.x - candidate.x, i.y - candidate.y) > i.r + r + 90)) {
+        islands.push(candidate);
+      }
+    }
+    return islands;
+  }
+
   /** Host/solo: once everyone has picked, spawn the fleet in a ring and go. */
   private maybeStartBattle() {
     if (this.phase !== 'select' || this.slots.some((s) => !s.pick)) return;
@@ -309,6 +337,7 @@ export class Game {
     this.slots.forEach((slot, i) => {
       this.spawnShip(slot, (i / n) * Math.PI * 2 - Math.PI / 2);
     });
+    this.islands = this.makeIslands();
     this.cannonballs = [];
     this.explosions = [];
     this.pendingBoom = [];
@@ -319,6 +348,7 @@ export class Game {
         t: 'start',
         mode: this.battleMode,
         target: this.target,
+        islands: this.islands,
         ships: this.slots.map((s) => ({
           id: s.id,
           name: s.name,
@@ -329,6 +359,20 @@ export class Game {
         })),
       });
     }
+  }
+
+  /** Steer the AI around an island looming dead ahead, if any. */
+  private avoidIslands(ship: Ship): Turn | null {
+    const aheadX = ship.x + Math.cos(ship.heading) * 80;
+    const aheadY = ship.y + Math.sin(ship.heading) * 80;
+    for (const isl of this.islands) {
+      if (Math.hypot(aheadX - isl.x, aheadY - isl.y) < isl.r + 35) {
+        const cross =
+          Math.cos(ship.heading) * (isl.y - ship.y) - Math.sin(ship.heading) * (isl.x - ship.x);
+        return cross > 0 ? -1 : 1; // island to starboard → turn to port
+      }
+    }
+    return null;
   }
 
   private nearestEnemy(ship: Ship): Ship | null {
@@ -409,7 +453,7 @@ export class Game {
         fire = this.input.isDown('Space');
       } else if (slot.ai) {
         const target = this.nearestEnemy(ship);
-        shipTurn = !this.over && target ? decideTurn(ship, target) : 0;
+        shipTurn = this.avoidIslands(ship) ?? (!this.over && target ? decideTurn(ship, target) : 0);
         fire = !this.over && target ? wantsToFire(ship, target) : false;
       } else {
         shipTurn = slot.input.turn;
@@ -417,6 +461,18 @@ export class Game {
       }
 
       ship.update(dt, shipTurn, WORLD_W, WORLD_H);
+
+      // Running into an island sinks the ship outright (no scorer).
+      if (ship.alive) {
+        for (const isl of this.islands) {
+          if (Math.hypot(ship.x - isl.x, ship.y - isl.y) < isl.r + ship.width / 2) {
+            ship.health = 0;
+            this.explosions.push(new Explosion(ship.x, ship.y));
+            this.pendingBoom.push({ x: ship.x, y: ship.y });
+            break;
+          }
+        }
+      }
 
       if (!this.over && fire && ship.alive && ship.reload <= 0) {
         const target = this.nearestEnemy(ship);
@@ -426,6 +482,13 @@ export class Game {
 
     for (const ball of this.cannonballs) {
       ball.update(dt);
+      if (ball.spent) continue;
+      for (const isl of this.islands) {
+        if (Math.hypot(ball.x - isl.x, ball.y - isl.y) < isl.r) {
+          ball.spent = true; // cannonballs don't pass through islands
+          break;
+        }
+      }
       if (ball.spent) continue;
       for (const slot of this.slots) {
         const target = slot.ship;
@@ -523,6 +586,7 @@ export class Game {
       this.drawShipSelect();
     } else {
       const ctx = this.ctx;
+      this.drawIslands();
       if (this.mode.kind === 'guest') {
         for (const ball of this.remoteBalls) drawCannonball(ctx, ball.x, ball.y);
       } else {
@@ -574,6 +638,36 @@ export class Game {
       ctx.beginPath();
       ctx.arc(wave.x, wave.y, wave.r, Math.PI * 0.15, Math.PI * 0.85);
       ctx.stroke();
+    }
+  }
+
+  private drawIslands() {
+    const ctx = this.ctx;
+    for (const isl of this.islands) {
+      // A slightly lumpy blob. The bumps are seeded from the island's own
+      // coordinates, so every client draws the identical shape.
+      const blob = (radius: number) => {
+        ctx.beginPath();
+        for (let i = 0; i <= 14; i++) {
+          const a = (i / 14) * Math.PI * 2;
+          const wobble = 1 + 0.1 * Math.sin(a * 3 + isl.x) + 0.07 * Math.cos(a * 5 + isl.y);
+          const px = isl.x + Math.cos(a) * radius * wobble;
+          const py = isl.y + Math.sin(a) * radius * wobble;
+          i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+      };
+
+      blob(isl.r);
+      ctx.fillStyle = '#d9c38a'; // sand
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.25)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      blob(isl.r * 0.55);
+      ctx.fillStyle = '#4f7a3a'; // scrub on top
+      ctx.fill();
     }
   }
 

@@ -15,8 +15,8 @@ const PLAYER_RELOAD = 1.4; // s between broadsides
 const AI_RELOAD = 2.2; // the AI aims perfectly, so it reloads slower
 const RESPAWN_DELAY = 3; // s between fully sinking and reappearing
 const SINK_TARGET = 5; // respawn mode: sinks needed to win the round
-const MIN_ISLANDS = 3;
-const MAX_ISLANDS = 6;
+const MIN_ISLANDS = 4;
+const MAX_ISLANDS = 7;
 
 // One distinct hull color per player slot (host is 0).
 export const PLAYER_COLORS = [
@@ -59,6 +59,7 @@ interface Slot {
   score: number; // ships sunk (respawn mode)
   respawnIn: number | null; // s until respawn, once fully sunk
   left: boolean; // disconnected mid-battle; never respawns
+  avoid: Turn; // AI: committed island-avoidance turn (0 = clear course)
 }
 
 function newSlot(id: number, name = '', ai = false): Slot {
@@ -73,6 +74,7 @@ function newSlot(id: number, name = '', ai = false): Slot {
     score: 0,
     respawnIn: null,
     left: false,
+    avoid: 0,
   };
 }
 
@@ -306,25 +308,33 @@ export class Game {
   }
 
   /**
-   * Scatter islands inside the spawn ring — well clear of the ring itself,
-   * so initial spawns and respawns always land on open water.
+   * Scatter islands across the whole map. The only no-go area is a band
+   * around the spawn ring, so initial spawns and respawns always land on
+   * open water; everything else — the middle and the outer reaches — is
+   * fair game, with sailing channels kept between islands.
    */
   private makeIslands(): Island[] {
+    const ring: { x: number; y: number }[] = [];
+    for (let i = 0; i < 48; i++) {
+      const a = (i / 48) * Math.PI * 2;
+      ring.push({
+        x: WORLD_W / 2 + Math.cos(a) * WORLD_W * 0.32,
+        y: WORLD_H / 2 + Math.sin(a) * WORLD_H * 0.32,
+      });
+    }
+
     const islands: Island[] = [];
     const count = MIN_ISLANDS + Math.floor(Math.random() * (MAX_ISLANDS - MIN_ISLANDS + 1));
-    for (let tries = 0; islands.length < count && tries < 200; tries++) {
-      const r = 25 + Math.random() * 30;
-      const angle = Math.random() * Math.PI * 2;
-      const f = Math.sqrt(Math.random()) * 0.6; // stay inside 60% of the ring
+    for (let tries = 0; islands.length < count && tries < 400; tries++) {
+      const r = 35 + Math.random() * 40;
       const candidate = {
-        x: WORLD_W / 2 + Math.cos(angle) * WORLD_W * 0.32 * f,
-        y: WORLD_H / 2 + Math.sin(angle) * WORLD_H * 0.32 * f,
+        x: r + 20 + Math.random() * (WORLD_W - 2 * r - 40),
+        y: r + 20 + Math.random() * (WORLD_H - 2 * r - 40),
         r,
       };
-      // Leave sailing channels between islands.
-      if (islands.every((i) => Math.hypot(i.x - candidate.x, i.y - candidate.y) > i.r + r + 90)) {
-        islands.push(candidate);
-      }
+      if (ring.some((p) => Math.hypot(p.x - candidate.x, p.y - candidate.y) < r + 55)) continue;
+      if (islands.some((i) => Math.hypot(i.x - candidate.x, i.y - candidate.y) < i.r + r + 100)) continue;
+      islands.push(candidate);
     }
     return islands;
   }
@@ -361,18 +371,36 @@ export class Game {
     }
   }
 
-  /** Steer the AI around an island looming dead ahead, if any. */
-  private avoidIslands(ship: Ship): Turn | null {
-    const aheadX = ship.x + Math.cos(ship.heading) * 80;
-    const aheadY = ship.y + Math.sin(ship.heading) * 80;
+  /**
+   * Steer the AI around islands. Checks whether any island overlaps the
+   * corridor the ship will sail through in the next ~140 px, and once a
+   * dodge starts, commits to that turn direction until the course is clear —
+   * otherwise the chase steering immediately pulls the bow back toward the
+   * island and the ship dithers its way onto the rocks.
+   */
+  private avoidIslands(slot: Slot, ship: Ship): Turn | null {
+    const fx = Math.cos(ship.heading);
+    const fy = Math.sin(ship.heading);
+    const LOOK = 140;
+    const CLEARANCE = 45;
+
+    let nearest: { side: number; along: number } | null = null;
     for (const isl of this.islands) {
-      if (Math.hypot(aheadX - isl.x, aheadY - isl.y) < isl.r + 35) {
-        const cross =
-          Math.cos(ship.heading) * (isl.y - ship.y) - Math.sin(ship.heading) * (isl.x - ship.x);
-        return cross > 0 ? -1 : 1; // island to starboard → turn to port
-      }
+      const dx = isl.x - ship.x;
+      const dy = isl.y - ship.y;
+      const along = dx * fx + dy * fy; // forward distance to the island center
+      if (along < -isl.r || along > LOOK + isl.r) continue;
+      const lateral = fx * dy - fy * dx; // signed offset from our course line
+      if (Math.abs(lateral) > isl.r + CLEARANCE) continue;
+      if (!nearest || along < nearest.along) nearest = { side: Math.sign(lateral) || 1, along };
     }
-    return null;
+
+    if (!nearest) {
+      slot.avoid = 0;
+      return null;
+    }
+    if (slot.avoid === 0) slot.avoid = nearest.side > 0 ? -1 : 1; // turn away from the island's side
+    return slot.avoid;
   }
 
   private nearestEnemy(ship: Ship): Ship | null {
@@ -453,7 +481,7 @@ export class Game {
         fire = this.input.isDown('Space');
       } else if (slot.ai) {
         const target = this.nearestEnemy(ship);
-        shipTurn = this.avoidIslands(ship) ?? (!this.over && target ? decideTurn(ship, target) : 0);
+        shipTurn = this.avoidIslands(slot, ship) ?? (!this.over && target ? decideTurn(ship, target) : 0);
         fire = !this.over && target ? wantsToFire(ship, target) : false;
       } else {
         shipTurn = slot.input.turn;

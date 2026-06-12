@@ -155,17 +155,32 @@ for (let i = 0; i < 10 && !scored; i++) {
     const g = window.__game;
     const [a, b] = [g.slots[0].ship, g.slots[1].ship];
     // Same heading = zero relative velocity, so the broadsides can't miss.
-    // Pick a lane of open water so neither ship runs aground mid-volley.
+    // Pick the clearest east-west lane so neither ship runs aground mid-volley.
     if (a?.alive && b?.alive) {
-      const clear = (x, y) => g.islands.every((i) => Math.hypot(x - i.x, y - i.y) > i.r + 80);
-      let y = 150;
-      for (; y < 560; y += 25) {
-        let ok = true;
-        for (let x = 320; x <= 700; x += 40) ok = ok && clear(x, y) && clear(x, y + 80);
-        if (ok) break;
+      const clearance = (y) => {
+        let worst = Infinity;
+        for (let x = 320; x <= 720; x += 40) {
+          for (const i of g.islands) {
+            worst = Math.min(
+              worst,
+              Math.hypot(x - i.x, y - i.y) - i.r,
+              Math.hypot(x - i.x, y + 80 - i.y) - i.r,
+            );
+          }
+        }
+        return worst;
+      };
+      let bestY = 150;
+      let best = -Infinity;
+      for (let y = 120; y < 540; y += 20) {
+        const c = clearance(y);
+        if (c > best) {
+          best = c;
+          bestY = y;
+        }
       }
-      a.x = 400; a.y = y; a.heading = 0;
-      b.x = 400; b.y = y + 80; b.heading = 0;
+      a.x = 400; a.y = bestY; a.heading = 0;
+      b.x = 400; b.y = bestY + 80; b.heading = 0;
     }
   });
   scored = await host2
@@ -222,6 +237,39 @@ const guest4 = await newPlayer('guest4', { width: 900, height: 600 });
 await joinVia(guest4, link2, 'Calico Jack');
 await host2.waitForFunction(() => document.getElementById('player-count').textContent.startsWith('2/2'), null, { timeout: 30000 });
 console.log('host refresh resumed the room; old invite link still valid ✓');
+
+// --- Solo AI seamanship: aim the AI straight at an island (with its ---
+// --- prey on the far side, the worst case) and expect it to dodge.  ---
+const solo = await newPlayer('solo', { width: 1100, height: 700 });
+await solo.goto(GAME_URL);
+await solo.click('#solo-btn');
+await solo.waitForSelector('#lobby', { state: 'detached', timeout: 10000 });
+await hold(solo, 'Digit1');
+await solo.waitForFunction(() => window.__game.phase === 'battle', null, { timeout: 10000 });
+
+let groundings = 0;
+for (let k = 0; k < 8; k++) {
+  await solo.evaluate((k) => {
+    const g = window.__game;
+    const isl = g.islands[k % g.islands.length];
+    const a = (k / 8) * Math.PI * 2;
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    const ai = g.slots[1].ship;
+    const player = g.slots[0].ship;
+    ai.health = ai.maxHealth;
+    player.health = player.maxHealth;
+    ai.x = isl.x - Math.cos(a) * 230;
+    ai.y = isl.y - Math.sin(a) * 230;
+    ai.heading = a; // bow pointed straight at the island...
+    player.x = clamp(isl.x + Math.cos(a) * 330, 30, 1250); // ...and the target beyond it
+    player.y = clamp(isl.y + Math.sin(a) * 330, 30, 690);
+    g.cannonballs.length = 0;
+  }, k);
+  await solo.waitForTimeout(3500);
+  if (!(await solo.evaluate(() => window.__game.slots[1].ship.alive))) groundings++;
+}
+if (groundings > 0) throw new Error(`AI ran aground ${groundings}/8 times`);
+console.log('AI dodged islands 8/8 ✓');
 
 await browser.close();
 console.log('done');

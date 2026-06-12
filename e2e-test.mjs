@@ -58,7 +58,7 @@ await extra.waitForFunction(statusIncludes('full'), null, { timeout: 30000 });
 console.log('over-capacity join rejected ✓');
 await extra.close();
 
-await host.waitForFunction(() => document.getElementById('player-list').textContent.startsWith('3/3'));
+await host.waitForFunction(() => document.getElementById('player-count').textContent.startsWith('3/3'));
 await host.click('#start-btn');
 
 // Everyone lands on ship select once the host starts.
@@ -98,7 +98,7 @@ const link2 = await host2.inputValue('#share-link');
 
 const guest3 = await newPlayer('guest3', { width: 1000, height: 700 });
 await guest3.goto(link2);
-await host2.waitForFunction(() => document.getElementById('player-list').textContent.startsWith('2/2'));
+await host2.waitForFunction(() => document.getElementById('player-count').textContent.startsWith('2/2'));
 await host2.click('#start-btn');
 for (const p of [host2, guest3]) await p.waitForSelector('#lobby', { state: 'detached', timeout: 15000 });
 
@@ -143,6 +143,26 @@ await host2.waitForFunction(
 );
 console.log('sunk ship respawned ✓');
 await host2.screenshot({ path: 'shot-respawn-battle.png' });
+
+// Host panel: switch the rules to elimination mid-battle...
+await host2.click('#panel-toggle');
+await host2.screenshot({ path: 'shot-host-panel.png' });
+await host2.selectOption('#panel-mode', 'elimination');
+await guest3.waitForFunction(() => window.__game.battleMode === 'elimination', null, { timeout: 10000 });
+console.log('mid-game rule change reached the guest ✓');
+
+// ...then kick the guest: they see the notice, their ship sinks for the host.
+await host2.click('#panel-players .kick-btn');
+await guest3.waitForFunction(() => window.__game.kicked === true, null, { timeout: 10000 });
+await host2.waitForFunction(
+  () => {
+    const g = window.__game;
+    return g.roster.length === 1 && !g.slots.find((s) => s.id === 1)?.ship?.alive;
+  },
+  null, { timeout: 10000 },
+);
+console.log('kick: guest notified, ship sunk, roster updated ✓');
+await guest3.screenshot({ path: 'shot-kicked.png' });
 
 await browser.close();
 console.log('done');

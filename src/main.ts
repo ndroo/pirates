@@ -32,7 +32,8 @@ const shareRow = document.getElementById('share-row') as HTMLDivElement;
 const shareLink = document.getElementById('share-link') as HTMLInputElement;
 const copyBtn = document.getElementById('copy-btn') as HTMLButtonElement;
 const waitRoom = document.getElementById('wait-room') as HTMLDivElement;
-const playerList = document.getElementById('player-list') as HTMLParagraphElement;
+const playerCount = document.getElementById('player-count') as HTMLParagraphElement;
+const playerList = document.getElementById('player-list') as HTMLDivElement;
 const startBtn = document.getElementById('start-btn') as HTMLButtonElement;
 
 // 2–16 players; beyond that a browser host's WebRTC connections get shaky.
@@ -54,11 +55,78 @@ function setBusy(busy: boolean) {
   ipCheck.disabled = busy;
 }
 
-function startGame(mode: GameMode) {
+function startGame(mode: GameMode): Game {
   lobby.remove();
   const game = new Game(ctx, new Input(), mode);
   (window as { __game?: Game }).__game = game; // for the e2e smoke test
   game.start();
+  return game;
+}
+
+/** In-game admin controls, shown only on the host's screen. */
+function buildHostPanel(game: Game, initialMode: BattleMode) {
+  const panel = document.createElement('div');
+  panel.id = 'host-panel';
+  panel.innerHTML = `
+    <button id="panel-toggle">⚙ Host</button>
+    <div id="panel-body" hidden>
+      <label>Mode
+        <select id="panel-mode">
+          <option value="elimination">Last ship standing</option>
+          <option value="respawn">Respawns</option>
+        </select>
+      </label>
+      <label id="panel-target-row">First to
+        <select id="panel-target">
+          <option>3</option>
+          <option selected>5</option>
+          <option>10</option>
+        </select>
+        sinks
+      </label>
+      <div id="panel-players"></div>
+    </div>`;
+  document.body.append(panel);
+
+  const body = panel.querySelector('#panel-body') as HTMLDivElement;
+  const modeSel = panel.querySelector('#panel-mode') as HTMLSelectElement;
+  const targetSel = panel.querySelector('#panel-target') as HTMLSelectElement;
+  const players = panel.querySelector('#panel-players') as HTMLDivElement;
+  modeSel.value = initialMode;
+
+  panel.querySelector('#panel-toggle')!.addEventListener('click', () => {
+    body.hidden = !body.hidden;
+  });
+
+  const applyRules = () => {
+    targetSel.disabled = modeSel.value === 'elimination';
+    game.setRules(modeSel.value as BattleMode, Number(targetSel.value));
+  };
+  modeSel.addEventListener('change', applyRules);
+  targetSel.addEventListener('change', applyRules);
+  targetSel.disabled = modeSel.value === 'elimination';
+
+  const refreshPlayers = () => {
+    players.replaceChildren(
+      ...game.roster
+        .filter((p) => p.id !== 0)
+        .map((p) => {
+          const row = document.createElement('div');
+          row.className = 'player-row';
+          const name = document.createElement('span');
+          name.textContent = p.label;
+          const kick = document.createElement('button');
+          kick.textContent = 'Kick';
+          kick.className = 'kick-btn';
+          kick.dataset.id = String(p.id);
+          kick.addEventListener('click', () => game.kickPlayer(p.id));
+          row.append(name, kick);
+          return row;
+        }),
+    );
+  };
+  refreshPlayers();
+  setInterval(refreshPlayers, 1000);
 }
 
 function describeError(err: unknown): string {
@@ -95,17 +163,33 @@ hostBtn.addEventListener('click', async () => {
     status.textContent = `Room code: ${net.code} — send your friends the invite link.`;
     copyShareLink();
 
-    const updateRoom = (players: number) => {
-      playerList.textContent = `${players}/${net.cap} players aboard`;
-      startBtn.disabled = players < 2;
+    const updateRoom = (guestIds: number[]) => {
+      playerCount.textContent = `${guestIds.length + 1}/${net.cap} players aboard`;
+      startBtn.disabled = guestIds.length < 1;
+      playerList.replaceChildren(
+        ...guestIds.map((id) => {
+          const row = document.createElement('div');
+          row.className = 'player-row';
+          const name = document.createElement('span');
+          name.textContent = `Player ${id + 1}`;
+          const kick = document.createElement('button');
+          kick.textContent = 'Kick';
+          kick.className = 'kick-btn';
+          kick.dataset.id = String(id);
+          kick.addEventListener('click', () => net.kick(id));
+          row.append(name, kick);
+          return row;
+        }),
+      );
     };
-    updateRoom(net.playerCount);
+    updateRoom(net.guestIds);
     net.onLobbyChange = updateRoom;
 
     startBtn.addEventListener('click', () => {
       net.markStarted();
       net.broadcast({ t: 'go-select' });
-      startGame({ kind: 'host', net, battle: modeSelect.value as BattleMode });
+      const game = startGame({ kind: 'host', net, battle: modeSelect.value as BattleMode });
+      buildHostPanel(game, modeSelect.value as BattleMode);
     });
   } catch (err) {
     status.textContent = describeError(err);

@@ -93,6 +93,7 @@ export class Game {
   private pendingBoom: { x: number; y: number }[] = []; // host: explosions to send
   private readyInfo: { ready: number; total: number } | null = null; // guest: select progress
   private disconnected = false;
+  private kicked = false;
 
   constructor(ctx: CanvasRenderingContext2D, input: Input, mode: GameMode = { kind: 'solo' }) {
     this.ctx = ctx;
@@ -152,6 +153,29 @@ export class Game {
     return this.aliveSlots[0];
   }
 
+  // --- host controls (driven by the DOM host panel) ---
+
+  /** Current players, for the host panel's kick list. */
+  get roster(): { id: number; label: string }[] {
+    return this.slots.filter((s) => !s.ai && !s.left).map((s) => ({ id: s.id, label: this.slotLabel(s) }));
+  }
+
+  /** Host: change the rules for everyone, effective immediately. */
+  setRules(mode: BattleMode, target: number) {
+    if (this.mode.kind !== 'host') return;
+    this.battleMode = mode;
+    this.target = target;
+    if (mode === 'elimination') {
+      for (const slot of this.slots) slot.respawnIn = null;
+    }
+    this.mode.net.broadcast({ t: 'rules', mode, target });
+  }
+
+  /** Host: remove a player. Their connection close sinks their ship. */
+  kickPlayer(id: number) {
+    if (this.mode.kind === 'host') this.mode.net.kick(id);
+  }
+
   // --- messages ---
 
   private handleGuestMessage(id: number, msg: NetMessage) {
@@ -170,6 +194,14 @@ export class Game {
     switch (msg.t) {
       case 'go-select':
         this.resetToSelect();
+        break;
+      case 'rules':
+        this.battleMode = msg.mode;
+        this.target = msg.target;
+        break;
+      case 'kicked':
+        this.kicked = true;
+        this.disconnected = true;
         break;
       case 'picked':
         this.readyInfo = { ready: msg.ready, total: msg.total };
@@ -673,7 +705,7 @@ export class Game {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 36px system-ui, sans-serif';
-    ctx.fillText('Connection lost', WORLD_W / 2, WORLD_H / 2 - 18);
+    ctx.fillText(this.kicked ? 'Removed by the host' : 'Connection lost', WORLD_W / 2, WORLD_H / 2 - 18);
     ctx.font = '19px system-ui, sans-serif';
     ctx.fillText('Refresh the page to start a new game.', WORLD_W / 2, WORLD_H / 2 + 22);
   }

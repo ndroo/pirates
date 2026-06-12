@@ -39,6 +39,8 @@ export type NetMessage =
   | { t: 'reject'; reason: RejectReason }
   | { t: 'lobby'; players: number; cap: number }
   | { t: 'go-select' } // leave the waiting room / start a rematch
+  | { t: 'rules'; mode: BattleMode; target: number } // host changed the rules
+  | { t: 'kicked' }
   | { t: 'picked'; ready: number; total: number }
   | { t: 'start'; mode: BattleMode; target: number; ships: ShipSpawn[] }
   | {
@@ -124,7 +126,7 @@ export class HostNet {
   readonly code: string;
   readonly cap: number;
 
-  onLobbyChange: (players: number) => void = () => {};
+  onLobbyChange: (guestIds: number[]) => void = () => {};
   onGuestLeave: (id: number) => void = () => {}; // fires only after the game starts
   onMessage: (id: number, msg: NetMessage) => void = () => {};
 
@@ -156,6 +158,14 @@ export class HostNet {
   /** Stop admitting new players (the battle is starting). */
   markStarted() {
     this.started = true;
+  }
+
+  /** Throw a player overboard. Their connection close fires the usual leave path. */
+  kick(id: number) {
+    const guest = this.guests.get(id);
+    if (!guest) return;
+    guest.conn.send({ t: 'kicked' } satisfies NetMessage);
+    setTimeout(() => guest.conn.close(), 300); // let the notice flush first
   }
 
   broadcast(msg: NetMessage) {
@@ -193,13 +203,13 @@ export class HostNet {
         this.onGuestLeave(id);
       } else {
         this.broadcastLobby();
-        this.onLobbyChange(this.playerCount);
+        this.onLobbyChange(this.guestIds);
       }
     });
 
     conn.send({ t: 'welcome', selfId: id, players: this.playerCount, cap: this.cap } satisfies NetMessage);
     this.broadcastLobby();
-    this.onLobbyChange(this.playerCount);
+    this.onLobbyChange(this.guestIds);
   }
 
   private broadcastLobby() {

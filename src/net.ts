@@ -37,12 +37,11 @@ export function cleanName(raw: unknown): string {
   return String(raw ?? '').replace(/\s+/g, ' ').trim().slice(0, 14);
 }
 
-export type RejectReason = 'full' | 'duplicate' | 'started' | 'same-ip';
+export type RejectReason = 'full' | 'duplicate' | 'same-ip';
 
 export const REJECT_TEXT: Record<RejectReason, string> = {
   full: 'That game is full.',
   duplicate: 'This device is already in that game.',
-  started: 'That game has already started.',
   'same-ip': 'Someone on your network is already in that game (the host blocked same-network joins).',
 };
 
@@ -56,6 +55,7 @@ export type NetMessage =
   | { t: 'kicked' }
   | { t: 'picked'; ready: number; total: number }
   | { t: 'start'; mode: BattleMode; target: number; ships: ShipSpawn[]; islands: Island[] }
+  | { t: 'spawn'; ship: ShipSpawn } // a latecomer's ship entering a running battle
   | {
       t: 'state';
       ships: ShipSnap[];
@@ -64,7 +64,9 @@ export type NetMessage =
     }
   // guest → host
   | { t: 'pick'; ship: ShipTypeName }
-  | { t: 'input'; turn: Turn; fire: boolean; restart: boolean };
+  | { t: 'input'; turn: Turn; fire: boolean; restart: boolean }
+  // both ways — liveness only; any message counts as a sign of life
+  | { t: 'ping' };
 
 // Room codes avoid lookalike characters (0/O, 1/I/L).
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -73,6 +75,12 @@ const CODE_LENGTH = 4;
 const ID_PREFIX = 'pirates-naval-combat-';
 
 const DEVICE_KEY = 'pirates-device-id';
+
+// WebRTC only fires 'close' for graceful shutdowns — a closed tab just goes
+// silent. Heartbeats let both sides notice within a few seconds. In battle
+// the 60Hz state/input traffic doubles as the heartbeat.
+const PING_MS = 2000;
+const STALE_MS = 7000;
 
 function randomCode(): string {
   let code = '';
@@ -133,6 +141,7 @@ interface GuestRecord {
   deviceId: string;
   name: string;
   ip: string | null;
+  lastSeen: number;
 }
 
 /** The host's end of the room: many guest connections, join vetting. */
@@ -141,6 +150,7 @@ export class HostNet {
   readonly cap: number;
 
   onLobbyChange: (guestIds: number[]) => void = () => {};
+  onGuestJoin: (id: number) => void = () => {}; // fires only after the game starts
   onGuestLeave: (id: number) => void = () => {}; // fires only after the game starts
   onMessage: (id: number, msg: NetMessage) => void = () => {};
 
@@ -159,6 +169,14 @@ export class HostNet {
     // Losing the broker doesn't break existing P2P links; reconnect so new
     // guests can still find the room.
     peer.on('disconnected', () => peer.reconnect());
+
+    setInterval(() => {
+      this.broadcast({ t: 'ping' });
+      const now = Date.now();
+      for (const guest of this.guests.values()) {
+        if (now - guest.lastSeen > STALE_MS) guest.conn.close(); // fires the leave path
+      }
+    }, PING_MS);
   }
 
   get playerCount(): number {
@@ -173,9 +191,17 @@ export class HostNet {
     return this.guests.get(id)?.name ?? '';
   }
 
-  /** Stop admitting new players (the battle is starting). */
+  /**
+   * The lobby phase is over: route joins/leaves to the game (players may
+   * still join mid-round, capacity permitting) instead of the waiting room.
+   */
   markStarted() {
     this.started = true;
+  }
+
+  sendTo(id: number, msg: NetMessage) {
+    const guest = this.guests.get(id);
+    if (guest?.conn.open) guest.conn.send(msg);
   }
 
   /** Throw a player overboard. Their connection close fires the usual leave path. */
@@ -198,8 +224,7 @@ export class HostNet {
     let ip: string | null = null;
 
     let reason: RejectReason | null = null;
-    if (this.started) reason = 'started';
-    else if (this.playerCount >= this.cap) reason = 'full';
+    if (this.playerCount >= this.cap) reason = 'full';
     else if (!dev || dev === deviceId() || [...this.guests.values()].some((g) => g.deviceId === dev)) {
       reason = 'duplicate';
     } else if (this.blockSameIp) {
@@ -214,8 +239,13 @@ export class HostNet {
     }
 
     const id = this.nextId++;
-    this.guests.set(id, { conn, deviceId: dev!, name: cleanName(meta?.name), ip });
-    conn.on('data', (data) => this.onMessage(id, data as NetMessage));
+    const record: GuestRecord = { conn, deviceId: dev!, name: cleanName(meta?.name), ip, lastSeen: Date.now() };
+    this.guests.set(id, record);
+    conn.on('data', (data) => {
+      record.lastSeen = Date.now();
+      const msg = data as NetMessage;
+      if (msg.t !== 'ping') this.onMessage(id, msg);
+    });
     conn.on('close', () => {
       if (!this.guests.delete(id)) return;
       if (this.started) {
@@ -227,8 +257,12 @@ export class HostNet {
     });
 
     conn.send({ t: 'welcome', selfId: id, players: this.playerCount, cap: this.cap } satisfies NetMessage);
-    this.broadcastLobby();
-    this.onLobbyChange(this.guestIds);
+    if (this.started) {
+      this.onGuestJoin(id);
+    } else {
+      this.broadcastLobby();
+      this.onLobbyChange(this.guestIds);
+    }
   }
 
   private broadcastLobby() {
@@ -243,13 +277,35 @@ export class GuestNet {
   onClose: () => void = () => {};
 
   private conn: DataConnection;
+  private lastSeen = Date.now();
+  private dead = false;
 
   constructor(peer: Peer, conn: DataConnection) {
     this.conn = conn;
-    conn.on('data', (data) => this.onMessage(data as NetMessage));
-    conn.on('close', () => this.onClose());
-    peer.on('error', () => this.onClose());
+    conn.on('data', (data) => {
+      this.lastSeen = Date.now();
+      const msg = data as NetMessage;
+      if (msg.t !== 'ping') this.onMessage(msg);
+    });
+    conn.on('close', () => this.die());
+    peer.on('error', () => this.die());
     peer.on('disconnected', () => peer.reconnect());
+
+    setInterval(() => {
+      this.send({ t: 'ping' });
+      if (Date.now() - this.lastSeen > STALE_MS) this.die();
+    }, PING_MS);
+  }
+
+  private die() {
+    if (this.dead) return;
+    this.dead = true;
+    try {
+      this.conn.close();
+    } catch {
+      // already gone
+    }
+    this.onClose();
   }
 
   send(msg: NetMessage) {

@@ -238,6 +238,43 @@ await joinVia(guest4, link2, 'Calico Jack');
 await host2.waitForFunction(() => document.getElementById('player-count').textContent.startsWith('2/2'), null, { timeout: 30000 });
 console.log('host refresh resumed the room; old invite link still valid ✓');
 
+// --- Mid-round joins and the empty-room reset. ---
+const hostM = await newPlayer('hostM', { width: 1300, height: 760 });
+await hostM.goto(GAME_URL);
+await hostM.click('#multi-btn');
+await hostM.selectOption('#cap-select', '3');
+await hostM.click('#host-btn');
+await hostM.waitForFunction(statusIncludes('Room code'), null, { timeout: 20000 });
+const linkM = await hostM.inputValue('#share-link');
+
+const early = await newPlayer('early', { width: 1000, height: 700 });
+await joinVia(early, linkM, 'First');
+await hostM.waitForFunction(() => document.getElementById('player-count').textContent.startsWith('2/3'));
+await hostM.click('#start-btn');
+for (const p of [hostM, early]) await p.waitForSelector('#lobby', { state: 'detached', timeout: 15000 });
+await hold(hostM, 'Digit1');
+await hold(early, 'Digit1');
+await hostM.waitForFunction(() => window.__game.phase === 'battle', null, { timeout: 10000 });
+
+const late = await newPlayer('late', { width: 900, height: 600 });
+await joinVia(late, linkM, 'Late');
+await late.waitForSelector('#lobby', { state: 'detached', timeout: 30000 }); // dropped straight into ship select
+await late.waitForFunction(() => window.__game?.phase === 'select', null, { timeout: 10000 });
+await hold(late, 'Digit2');
+await late.waitForFunction(
+  () => window.__game.phase === 'battle' && window.__game.slots.length === 3,
+  null, { timeout: 10000 },
+);
+await hostM.waitForFunction(() => window.__game.slots.filter((s) => s.ship?.alive).length === 3, null, { timeout: 10000 });
+await early.waitForFunction(() => window.__game.slots.length === 3, null, { timeout: 10000 });
+console.log('latecomer joined mid-round on all screens ✓');
+
+await early.close();
+await late.close();
+await hostM.waitForFunction(() => window.__game.phase === 'select', null, { timeout: 20000 });
+console.log('empty room returns the host to the pre-game screen ✓');
+await hostM.close();
+
 // --- Solo AI seamanship: aim the AI straight at an island (with its ---
 // --- prey on the far side, the worst case) and expect it to dodge.  ---
 const solo = await newPlayer('solo', { width: 1100, height: 700 });

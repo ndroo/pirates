@@ -115,6 +115,7 @@ export class Game {
     if (mode.kind === 'host') {
       this.battleMode = mode.battle;
       mode.net.onMessage = (id, msg) => this.handleGuestMessage(id, msg);
+      mode.net.onGuestJoin = (id) => this.admitLatecomer(id);
       mode.net.onGuestLeave = (id) => this.dropPlayer(id);
     } else if (mode.kind === 'guest') {
       mode.net.onMessage = (msg) => this.handleHostMessage(msg);
@@ -218,12 +219,53 @@ export class Game {
   private handleGuestMessage(id: number, msg: NetMessage) {
     const slot = this.slots.find((s) => s.id === id);
     if (!slot) return;
-    if (msg.t === 'pick' && this.phase === 'select' && !slot.pick) {
+    if (msg.t === 'pick' && !slot.pick) {
       slot.pick = msg.ship;
-      this.broadcastPicked();
-      this.maybeStartBattle();
+      if (this.phase === 'select') {
+        this.broadcastPicked();
+        this.maybeStartBattle();
+      } else if (!this.over && !slot.ship) {
+        this.spawnLatecomer(slot);
+      }
+      // Picked while the round-over banner is up: they sail next round.
     } else if (msg.t === 'input') {
       slot.input = { turn: msg.turn, fire: msg.fire, restart: msg.restart };
+    }
+  }
+
+  /** Host: a new player connected after the game left the waiting room. */
+  private admitLatecomer(id: number) {
+    if (this.mode.kind !== 'host' || this.slots.some((s) => s.id === id)) return;
+    this.slots.push(newSlot(id, this.mode.net.guestName(id)));
+    this.mode.net.sendTo(id, { t: 'go-select' }); // drop them on ship select
+    this.broadcastPicked();
+  }
+
+  /** Host: a latecomer picked their ship — sail it into the running battle. */
+  private spawnLatecomer(slot: Slot) {
+    if (this.mode.kind !== 'host') return;
+    this.spawnShip(slot, Math.random() * Math.PI * 2); // the ring is island-free
+    const net = this.mode.net;
+    const spawn = {
+      id: slot.id,
+      name: slot.name,
+      type: slot.pick!,
+      x: slot.ship!.x,
+      y: slot.ship!.y,
+      heading: slot.ship!.heading,
+    };
+    // The newcomer needs the whole battle; everyone else just the new ship.
+    net.sendTo(slot.id, {
+      t: 'start',
+      mode: this.battleMode,
+      target: this.target,
+      islands: this.islands,
+      ships: this.slots
+        .filter((s) => s.ship)
+        .map((s) => ({ id: s.id, name: s.name, type: s.pick!, x: s.ship!.x, y: s.ship!.y, heading: s.ship!.heading })),
+    });
+    for (const gid of net.guestIds) {
+      if (gid !== slot.id) net.sendTo(gid, { t: 'spawn', ship: spawn });
     }
   }
 
@@ -258,6 +300,14 @@ export class Game {
         this.explosions = [];
         this.phase = 'battle';
         break;
+      case 'spawn': {
+        const sp = msg.ship;
+        const slot = newSlot(sp.id, sp.name);
+        slot.pick = sp.type;
+        slot.ship = new Ship(sp.x, sp.y, sp.heading, slot.color, sp.type);
+        this.slots = [...this.slots.filter((s) => s.id !== sp.id), slot];
+        break;
+      }
       case 'state':
         if (this.phase !== 'battle') break;
         for (const snap of msg.ships) this.applySnap(snap);
@@ -283,6 +333,12 @@ export class Game {
   private dropPlayer(id: number) {
     const slot = this.slots.find((s) => s.id === id);
     if (!slot) return;
+    if (this.mode.kind === 'host' && this.mode.net.guestIds.length === 0) {
+      // Everyone left: back to the pre-game screen. The room stays open, so
+      // the invite link keeps working and joiners drop straight into select.
+      this.resetToSelect();
+      return;
+    }
     if (this.phase === 'select') {
       this.slots = this.slots.filter((s) => s !== slot);
       this.broadcastPicked();
@@ -364,6 +420,7 @@ export class Game {
   /** Host/solo: once everyone has picked, spawn the fleet in a ring and go. */
   private maybeStartBattle() {
     if (this.phase !== 'select' || this.slots.some((s) => !s.pick)) return;
+    if (this.mode.kind === 'host' && this.slots.length < 2) return; // wait for a crew
 
     const n = this.slots.length;
     this.slots.forEach((slot, i) => {
@@ -796,6 +853,14 @@ export class Game {
       w / 2,
       h * 0.82,
     );
+    if (this.mode.kind === 'host' && this.slots.length < 2) {
+      ctx.fillText(
+        `Waiting for players to join — room code ${this.mode.net.code}`,
+        w / 2,
+        h * 0.82 + 28,
+      );
+      return;
+    }
     const ready =
       this.mode.kind === 'host'
         ? { ready: this.slots.filter((s) => s.pick).length, total: this.slots.length }

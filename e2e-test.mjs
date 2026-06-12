@@ -252,8 +252,20 @@ for (let k = 0; k < 8; k++) {
   await solo.evaluate((k) => {
     const g = window.__game;
     const isl = g.islands[k % g.islands.length];
-    const a = (k / 8) * Math.PI * 2;
     const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    // Rotate the approach until the spawn spot is on-map and on open water —
+    // a teleport into another island (or off-world) is not a steering
+    // failure, just a bad test placement.
+    let a = (k / 8) * Math.PI * 2;
+    for (let j = 0; j < 16; j++) {
+      const x = isl.x - Math.cos(a) * 230;
+      const y = isl.y - Math.sin(a) * 230;
+      const valid =
+        x > 30 && x < 1250 && y > 30 && y < 690 &&
+        g.islands.every((i) => Math.hypot(x - i.x, y - i.y) > i.r + 70);
+      if (valid) break;
+      a += Math.PI / 8;
+    }
     const ai = g.slots[1].ship;
     const player = g.slots[0].ship;
     ai.health = ai.maxHealth;

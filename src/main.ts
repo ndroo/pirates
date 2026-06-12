@@ -25,6 +25,9 @@ const soloBtn = document.getElementById('solo-btn') as HTMLButtonElement;
 const hostBtn = document.getElementById('host-btn') as HTMLButtonElement;
 const joinBtn = document.getElementById('join-btn') as HTMLButtonElement;
 const codeInput = document.getElementById('code-input') as HTMLInputElement;
+const shareRow = document.getElementById('share-row') as HTMLDivElement;
+const shareLink = document.getElementById('share-link') as HTMLInputElement;
+const copyBtn = document.getElementById('copy-btn') as HTMLButtonElement;
 
 function setBusy(busy: boolean) {
   soloBtn.disabled = busy;
@@ -47,12 +50,28 @@ function describeError(err: unknown): string {
 
 soloBtn.addEventListener('click', () => startGame({ kind: 'solo' }));
 
+async function copyShareLink() {
+  try {
+    await navigator.clipboard.writeText(shareLink.value);
+    copyBtn.textContent = 'Copied!';
+  } catch {
+    // Clipboard access denied (e.g. Safari outside a click) — select the
+    // text so the user can copy it themselves.
+    shareLink.focus();
+    shareLink.select();
+  }
+}
+copyBtn.addEventListener('click', copyShareLink);
+
 hostBtn.addEventListener('click', async () => {
   setBusy(true);
   status.textContent = 'Creating room…';
   try {
     const net = await hostGame((code) => {
-      status.textContent = `Room code: ${code} — share it with your friend and wait here.`;
+      shareLink.value = `${location.origin}${location.pathname}?join=${code}`;
+      shareRow.hidden = false;
+      status.textContent = `Room code: ${code} — send your friend the invite link and wait here.`;
+      copyShareLink();
     });
     startGame({ kind: 'host', net });
   } catch (err) {
@@ -81,3 +100,10 @@ joinBtn.addEventListener('click', join);
 codeInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') join();
 });
+
+// Opened via an invite link (?join=CODE) — join the friend's game directly.
+const inviteCode = new URLSearchParams(location.search).get('join');
+if (inviteCode) {
+  codeInput.value = inviteCode;
+  join();
+}

@@ -1,28 +1,31 @@
 // Smoke test: two browsers play a multiplayer match via the real PeerJS broker.
 import { chromium } from 'playwright';
 
-const URL = process.env.GAME_URL || 'http://localhost:4173/';
+const GAME_URL = process.env.GAME_URL || 'http://localhost:4173/';
 
 const browser = await chromium.launch();
-const host = await browser.newPage({ viewport: { width: 1300, height: 760 } });
-const guest = await browser.newPage({ viewport: { width: 900, height: 600 } });
+const context = await browser.newContext();
+await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(GAME_URL).origin });
+const host = await context.newPage();
+await host.setViewportSize({ width: 1300, height: 760 });
+const guest = await context.newPage();
+await guest.setViewportSize({ width: 900, height: 600 });
 
 host.on('console', (m) => console.log('[host]', m.text()));
 guest.on('console', (m) => console.log('[guest]', m.text()));
 host.on('pageerror', (e) => console.log('[host:ERR]', e.message));
 guest.on('pageerror', (e) => console.log('[guest:ERR]', e.message));
 
-await host.goto(URL);
-await guest.goto(URL);
+await host.goto(GAME_URL);
 
 await host.click('#host-btn');
 await host.waitForFunction(() => document.getElementById('lobby-status').textContent.includes('Room code'), null, { timeout: 20000 });
-const statusText = await host.textContent('#lobby-status');
-const code = statusText.match(/Room code: ([A-Z2-9]{4})/)[1];
-console.log('room code:', code);
+const link = await host.inputValue('#share-link');
+const clipboard = await host.evaluate(() => navigator.clipboard.readText());
+console.log('invite link:', link, '| clipboard matches:', clipboard === link);
 
-await guest.fill('#code-input', code);
-await guest.click('#join-btn');
+// Guest joins via the invite link — no code entry needed.
+await guest.goto(link);
 
 // Lobby is removed only once the P2P data channel opens on each side.
 await host.waitForSelector('#lobby', { state: 'detached', timeout: 30000 });

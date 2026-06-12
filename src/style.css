@@ -82,6 +82,18 @@ canvas {
   flex: 1;
 }
 
+#share-link {
+  font-size: 13px;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: normal;
+  flex: 3;
+}
+
+#copy-btn {
+  flex: 1;
+}
+
 #lobby-status {
   min-height: 2.5em;
   margin: 4px 0 0;

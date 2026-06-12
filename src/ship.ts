@@ -74,7 +74,7 @@ export class Ship {
     this.health = Math.max(0, this.health - 1);
   }
 
-  update(dt: number, turn: Turn, worldW: number, worldH: number) {
+  update(dt: number, turn: Turn, worldW: number, worldH: number, wind?: { x: number; y: number }) {
     this.reload = Math.max(0, this.reload - dt);
 
     if (!this.alive) {
@@ -83,8 +83,10 @@ export class Ship {
     }
 
     this.heading += turn * this.turnRate * dt;
-    this.x += Math.cos(this.heading) * this.speed * dt;
-    this.y += Math.sin(this.heading) * this.speed * dt;
+    // Running before the wind is faster, beating into it slower.
+    const windFactor = wind ? 1 + wind.x * Math.cos(this.heading) + wind.y * Math.sin(this.heading) : 1;
+    this.x += Math.cos(this.heading) * this.speed * windFactor * dt;
+    this.y += Math.sin(this.heading) * this.speed * windFactor * dt;
 
     // Wrap around world edges, with margin so the ship fully leaves first.
     const m = this.length;

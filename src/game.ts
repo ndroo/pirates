@@ -2,7 +2,7 @@ import { decideTurn, wantsToFire } from './ai';
 import { Cannonball, drawCannonball } from './cannonball';
 import { Explosion } from './explosion';
 import type { Input } from './input';
-import type { BattleMode, GuestNet, HostNet, Island, NetMessage, ShipSnap } from './net';
+import type { BattleMode, GuestNet, HostNet, Island, NetMessage, ShipSnap, Wind } from './net';
 import { Ship, SHIP_TYPES, type ShipTypeName, type Turn } from './ship';
 
 // Fixed logical arena so all players see the same battlefield; the canvas is
@@ -95,6 +95,7 @@ export class Game {
   private cannonballs: Cannonball[] = [];
   private explosions: Explosion[] = [];
   private islands: Island[] = [];
+  private wind: Wind = { dir: 0, strength: 0 };
   private waves: Wave[] = [];
   private lastTime = 0;
 
@@ -185,6 +186,13 @@ export class Game {
     return this.aliveSlots.length <= 1;
   }
 
+  private get windVec(): { x: number; y: number } {
+    return {
+      x: Math.cos(this.wind.dir) * this.wind.strength,
+      y: Math.sin(this.wind.dir) * this.wind.strength,
+    };
+  }
+
   private get winner(): Slot | undefined {
     if (!this.over) return undefined;
     if (this.battleMode === 'respawn') return this.slots.find((s) => s.score >= this.target);
@@ -260,6 +268,7 @@ export class Game {
       mode: this.battleMode,
       target: this.target,
       islands: this.islands,
+      wind: this.wind,
       ships: this.slots
         .filter((s) => s.ship)
         .map((s) => ({ id: s.id, name: s.name, type: s.pick!, x: s.ship!.x, y: s.ship!.y, heading: s.ship!.heading })),
@@ -295,6 +304,7 @@ export class Game {
           return slot;
         });
         this.islands = msg.islands;
+        this.wind = msg.wind;
         this.cannonballs = [];
         this.remoteBalls = [];
         this.explosions = [];
@@ -427,6 +437,7 @@ export class Game {
       this.spawnShip(slot, (i / n) * Math.PI * 2 - Math.PI / 2);
     });
     this.islands = this.makeIslands();
+    this.wind = { dir: Math.random() * Math.PI * 2, strength: 0.08 + Math.random() * 0.32 };
     this.cannonballs = [];
     this.explosions = [];
     this.pendingBoom = [];
@@ -438,6 +449,7 @@ export class Game {
         mode: this.battleMode,
         target: this.target,
         islands: this.islands,
+        wind: this.wind,
         ships: this.slots.map((s) => ({
           id: s.id,
           name: s.name,
@@ -456,17 +468,20 @@ export class Game {
    */
   private pathClearance(ship: Ship, turn: Turn, horizon = 2.4): number {
     const step = 0.12;
+    // Assume the worst-case tailwind throughout so the dodge is never
+    // started later than the real (wind-boosted) ship would need.
+    const speed = ship.speed * (1 + this.wind.strength);
     let x = ship.x;
     let y = ship.y;
     let h = ship.heading;
     let traveled = 0;
     for (let t = 0; t < horizon; t += step) {
       h += turn * ship.turnRate * step;
-      x += Math.cos(h) * ship.speed * step;
-      y += Math.sin(h) * ship.speed * step;
+      x += Math.cos(h) * speed * step;
+      y += Math.sin(h) * speed * step;
       x = ((x % WORLD_W) + WORLD_W) % WORLD_W; // mirror the world wrap
       y = ((y % WORLD_H) + WORLD_H) % WORLD_H;
-      traveled += ship.speed * step;
+      traveled += speed * step;
       for (const isl of this.islands) {
         if (Math.hypot(x - isl.x, y - isl.y) < isl.r + ship.width / 2 + 12) return traveled;
       }
@@ -541,6 +556,12 @@ export class Game {
       return;
     }
 
+    // The waves run with the wind — an ambient cue for its direction.
+    for (const wave of this.waves) {
+      wave.x = (wave.x + this.windVec.x * 60 * dt + WORLD_W) % WORLD_W;
+      wave.y = (wave.y + this.windVec.y * 60 * dt + WORLD_H) % WORLD_H;
+    }
+
     let turn: Turn = 0;
     if (this.input.isDown('ArrowLeft') || this.input.isDown('KeyA')) turn = -1;
     if (this.input.isDown('ArrowRight') || this.input.isDown('KeyD')) turn = 1;
@@ -592,7 +613,7 @@ export class Game {
         fire = slot.input.fire;
       }
 
-      ship.update(dt, shipTurn, WORLD_W, WORLD_H);
+      ship.update(dt, shipTurn, WORLD_W, WORLD_H, this.windVec);
 
       // Running into an island sinks the ship outright (no scorer).
       if (ship.alive) {
@@ -738,6 +759,7 @@ export class Game {
         if (slot.ship) this.drawHealthRow(slot, row);
       });
 
+      this.drawWind();
       this.drawRespawnNotice();
       if (this.over) this.drawGameOver();
     }
@@ -896,6 +918,40 @@ export class Game {
       ctx.fillStyle = i < ship.health ? '#4caf50' : 'rgba(255, 255, 255, 0.25)';
       ctx.fillRect(x0 + i * (segW + gap), y, segW, segH);
     }
+  }
+
+  /** Wind dial top-center: an arrow pointing where the wind blows, plus strength. */
+  private drawWind() {
+    const ctx = this.ctx;
+    const cx = WORLD_W / 2;
+    const cy = 24;
+    const len = 16 + this.wind.strength * 60;
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.lineWidth = 2.5;
+    ctx.translate(cx, cy);
+    ctx.rotate(this.wind.dir);
+    ctx.beginPath();
+    ctx.moveTo(-len / 2, 0);
+    ctx.lineTo(len / 2, 0);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(len / 2 + 7, 0);
+    ctx.lineTo(len / 2 - 2, -5);
+    ctx.lineTo(len / 2 - 2, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    const label =
+      this.wind.strength < 0.17 ? 'Light breeze' : this.wind.strength < 0.29 ? 'Steady wind' : 'Strong gale';
+    ctx.font = '13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+    ctx.fillText(label, cx, cy + 14);
   }
 
   /** Respawn mode: tell a sunk player their ship is coming back. */

@@ -25,6 +25,12 @@ export interface ShipSpawn {
   heading: number;
 }
 
+/** Per-round wind: dir is where it blows toward; strength is the max speed effect. */
+export interface Wind {
+  dir: number; // radians
+  strength: number; // 0..~0.4: ±fraction of ship speed down/upwind
+}
+
 /** A round island hazard: ships that hit it sink, cannonballs splash on it. */
 export interface Island {
   x: number;
@@ -54,7 +60,14 @@ export type NetMessage =
   | { t: 'rules'; mode: BattleMode; target: number } // host changed the rules
   | { t: 'kicked' }
   | { t: 'picked'; ready: number; total: number }
-  | { t: 'start'; mode: BattleMode; target: number; ships: ShipSpawn[]; islands: Island[] }
+  | {
+      t: 'start';
+      mode: BattleMode;
+      target: number;
+      ships: ShipSpawn[];
+      islands: Island[];
+      wind: Wind;
+    }
   | { t: 'spawn'; ship: ShipSpawn } // a latecomer's ship entering a running battle
   | {
       t: 'state';

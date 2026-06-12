@@ -124,13 +124,19 @@ await hold(host2, 'Digit1'); // small ships sink fast
 await hold(guest3, 'Digit1');
 await host2.waitForTimeout(500);
 
-// Islands: same layout on both screens.
+// Islands and wind: same on both screens.
 const hostIslands = await host2.evaluate(() => window.__game.islands);
 const guestIslands = await guest3.evaluate(() => window.__game.islands);
 if (!hostIslands.length || JSON.stringify(hostIslands) !== JSON.stringify(guestIslands)) {
   throw new Error(`island mismatch: host ${JSON.stringify(hostIslands)} guest ${JSON.stringify(guestIslands)}`);
 }
 console.log(`islands synced (${hostIslands.length}) ✓`);
+const hostWind = await host2.evaluate(() => window.__game.wind);
+const guestWind = await guest3.evaluate(() => window.__game.wind);
+if (hostWind.strength <= 0 || JSON.stringify(hostWind) !== JSON.stringify(guestWind)) {
+  throw new Error(`wind mismatch: host ${JSON.stringify(hostWind)} guest ${JSON.stringify(guestWind)}`);
+}
+console.log(`wind synced (strength ${hostWind.strength.toFixed(2)}) ✓`);
 
 // Running aground must sink the ship on the spot (and respawn it, in this mode).
 await host2.evaluate(() => {
@@ -319,6 +325,29 @@ for (let k = 0; k < 8; k++) {
 }
 if (groundings > 0) throw new Error(`AI ran aground ${groundings}/8 times`);
 console.log('AI dodged islands 8/8 ✓');
+
+// Wind physics: the same ship covers more water downwind than upwind.
+const measure = async (against) => {
+  await solo.evaluate((against) => {
+    const g = window.__game;
+    g.islands = []; // clear water for the measurement (host-side sim only)
+    const ship = g.slots[0].ship;
+    ship.health = ship.maxHealth;
+    ship.x = 640;
+    ship.y = 360;
+    ship.heading = g.wind.dir + (against ? Math.PI : 0);
+    window.__start = { x: ship.x, y: ship.y };
+  }, against);
+  await solo.waitForTimeout(900);
+  return solo.evaluate(() => {
+    const ship = window.__game.slots[0].ship;
+    return Math.hypot(ship.x - window.__start.x, ship.y - window.__start.y);
+  });
+};
+const downwind = await measure(false);
+const upwind = await measure(true);
+if (downwind <= upwind * 1.02) throw new Error(`wind has no effect: downwind ${downwind} vs upwind ${upwind}`);
+console.log(`wind physics: downwind ${Math.round(downwind)}px vs upwind ${Math.round(upwind)}px ✓`);
 
 // --- Mobile: tap to pick a ship, on-screen buttons steer and fire. ---
 const phoneCtx = await browser.newContext({ ...devices['iPhone 13'] });

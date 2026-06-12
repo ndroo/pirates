@@ -1,15 +1,26 @@
 import { decideTurn, wantsToFire } from './ai';
-import { Cannonball } from './cannonball';
+import { Cannonball, drawCannonball } from './cannonball';
 import { Explosion } from './explosion';
 import type { Input } from './input';
+import type { Net, NetMessage, ShipSnap } from './net';
 import { Ship, SHIP_TYPES, type ShipTypeName, type Turn } from './ship';
+
+// Fixed logical arena so both players see the same battlefield; the canvas is
+// scaled to fit each window.
+export const WORLD_W = 1280;
+export const WORLD_H = 720;
 
 const MAX_DT = 0.05; // s; clamp so tab-switch pauses don't teleport ships
 const PLAYER_RELOAD = 1.4; // s between broadsides
-const ENEMY_RELOAD = 2.2;
+const ENEMY_RELOAD = 2.2; // AI only; humans both get PLAYER_RELOAD
 
-const PLAYER_COLOR = '#8b5a2b';
-const ENEMY_COLOR = '#7a1f1f';
+const HOST_COLOR = '#8b5a2b';
+const GUEST_COLOR = '#7a1f1f';
+
+export type GameMode =
+  | { kind: 'solo' }
+  | { kind: 'host'; net: Net }
+  | { kind: 'guest'; net: Net };
 
 const SELECT_KEYS: Record<string, ShipTypeName> = {
   Digit1: 'small',
@@ -32,42 +43,120 @@ interface Wave {
 export class Game {
   private ctx: CanvasRenderingContext2D;
   private input: Input;
+  private mode: GameMode;
+  private net: Net | null = null;
+
   private phase: 'select' | 'battle' = 'select';
-  private player!: Ship;
-  private enemy!: Ship;
+  private mine!: Ship; // this player's ship (the AI's in solo is `theirs`)
+  private theirs!: Ship;
   private cannonballs: Cannonball[] = [];
   private explosions: Explosion[] = [];
   private waves: Wave[] = [];
   private lastTime = 0;
 
-  constructor(ctx: CanvasRenderingContext2D, input: Input) {
+  // Multiplayer state.
+  private myPick: ShipTypeName | null = null;
+  private theirPick: ShipTypeName | null = null;
+  private remoteInput = { turn: 0 as Turn, fire: false, restart: false }; // host: guest's keys
+  private remoteBalls: { x: number; y: number }[] = []; // guest: balls from snapshots
+  private pendingBoom: { x: number; y: number }[] = []; // host: explosions to send
+  private disconnected = false;
+
+  constructor(ctx: CanvasRenderingContext2D, input: Input, mode: GameMode = { kind: 'solo' }) {
     this.ctx = ctx;
     this.input = input;
+    this.mode = mode;
 
-    const { width: w, height: h } = ctx.canvas;
+    if (mode.kind !== 'solo') {
+      this.net = mode.net;
+      this.net.onMessage = (msg) => this.handleMessage(msg);
+      this.net.onClose = () => {
+        this.disconnected = true;
+      };
+    }
+
     for (let i = 0; i < 40; i++) {
       this.waves.push({
-        x: Math.random() * w,
-        y: Math.random() * h,
+        x: Math.random() * WORLD_W,
+        y: Math.random() * WORLD_H,
         r: 6 + Math.random() * 10,
       });
     }
   }
 
-  private startBattle(playerType: ShipTypeName) {
-    const { width: w, height: h } = this.ctx.canvas;
-    const enemyTypes = Object.keys(SHIP_TYPES) as ShipTypeName[];
-    const enemyType = enemyTypes[Math.floor(Math.random() * enemyTypes.length)];
+  private handleMessage(msg: NetMessage) {
+    switch (msg.t) {
+      case 'pick':
+        this.theirPick = msg.ship;
+        if (this.mode.kind === 'host') this.tryStartHostBattle();
+        break;
+      case 'input': // guest keys, applied by the host each frame
+        this.remoteInput = { turn: msg.turn, fire: msg.fire, restart: msg.restart };
+        break;
+      case 'start': // host picked positions/types; guest mirrors them
+        if (this.mode.kind === 'guest') {
+          this.theirs = new Ship(WORLD_W * 0.3, WORLD_H * 0.6, -Math.PI / 4, HOST_COLOR, msg.hostType);
+          this.mine = new Ship(WORLD_W * 0.7, WORLD_H * 0.3, Math.PI * 0.75, GUEST_COLOR, msg.guestType);
+          this.cannonballs = [];
+          this.remoteBalls = [];
+          this.explosions = [];
+          this.phase = 'battle';
+        }
+        break;
+      case 'phase':
+        this.resetToSelect();
+        break;
+      case 'state':
+        if (this.mode.kind === 'guest' && this.phase === 'battle') {
+          this.applySnap(this.theirs, msg.ships[0]);
+          this.applySnap(this.mine, msg.ships[1]);
+          this.remoteBalls = msg.balls;
+          for (const b of msg.boom) this.explosions.push(new Explosion(b.x, b.y));
+        }
+        break;
+    }
+  }
 
-    this.player = new Ship(w * 0.3, h * 0.6, -Math.PI / 4, PLAYER_COLOR, playerType);
-    this.enemy = new Ship(w * 0.7, h * 0.3, Math.PI * 0.75, ENEMY_COLOR, enemyType);
+  private applySnap(ship: Ship, snap: ShipSnap) {
+    ship.x = snap.x;
+    ship.y = snap.y;
+    ship.heading = snap.heading;
+    ship.health = snap.health;
+    ship.sinkProgress = snap.sink;
+  }
+
+  private snapOf(ship: Ship): ShipSnap {
+    return { x: ship.x, y: ship.y, heading: ship.heading, health: ship.health, sink: ship.sinkProgress };
+  }
+
+  private resetToSelect() {
+    this.phase = 'select';
+    this.myPick = null;
+    this.theirPick = null;
+    this.remoteInput = { turn: 0, fire: false, restart: false };
+    this.cannonballs = [];
+    this.remoteBalls = [];
+    this.explosions = [];
+    this.pendingBoom = [];
+  }
+
+  private startBattle(mineType: ShipTypeName, theirType: ShipTypeName) {
+    this.mine = new Ship(WORLD_W * 0.3, WORLD_H * 0.6, -Math.PI / 4, HOST_COLOR, mineType);
+    this.theirs = new Ship(WORLD_W * 0.7, WORLD_H * 0.3, Math.PI * 0.75, GUEST_COLOR, theirType);
     this.cannonballs = [];
     this.explosions = [];
+    this.pendingBoom = [];
     this.phase = 'battle';
   }
 
+  private tryStartHostBattle() {
+    if (!this.myPick || !this.theirPick) return;
+    this.startBattle(this.myPick, this.theirPick);
+    this.net!.send({ t: 'start', hostType: this.myPick, guestType: this.theirPick });
+  }
+
   private get over(): boolean {
-    return !this.player.alive || !this.enemy.alive;
+    return !this.mine.alive || !this.theirs.alive;
   }
 
   start() {
@@ -84,20 +173,9 @@ export class Game {
   };
 
   private update(dt: number) {
+    if (this.disconnected) return;
     if (this.phase === 'select') {
-      for (const [code, type] of Object.entries(SELECT_KEYS)) {
-        if (this.input.isDown(code)) {
-          this.startBattle(type);
-          break;
-        }
-      }
-      return;
-    }
-
-    const { width: w, height: h } = this.ctx.canvas;
-
-    if (this.over && this.input.isDown('KeyR')) {
-      this.phase = 'select';
+      this.updateSelect();
       return;
     }
 
@@ -105,31 +183,88 @@ export class Game {
     if (this.input.isDown('ArrowLeft') || this.input.isDown('KeyA')) turn = -1;
     if (this.input.isDown('ArrowRight') || this.input.isDown('KeyD')) turn = 1;
 
-    this.player.update(dt, turn, w, h);
-    this.enemy.update(dt, this.over ? 0 : decideTurn(this.enemy, this.player), w, h);
+    if (this.mode.kind === 'guest') {
+      this.net!.send({
+        t: 'input',
+        turn,
+        fire: this.input.isDown('Space'),
+        restart: this.over && this.input.isDown('KeyR'),
+      });
+      // The host simulates; we just animate our local explosion effects.
+      for (const ex of this.explosions) ex.update(dt);
+      this.explosions = this.explosions.filter((ex) => !ex.done);
+      return;
+    }
+
+    if (this.over && (this.input.isDown('KeyR') || this.remoteInput.restart)) {
+      this.resetToSelect();
+      this.net?.send({ t: 'phase', phase: 'select' });
+      return;
+    }
+
+    const theirTurn: Turn =
+      this.mode.kind === 'host'
+        ? this.remoteInput.turn
+        : this.over
+          ? 0
+          : decideTurn(this.theirs, this.mine);
+
+    this.mine.update(dt, turn, WORLD_W, WORLD_H);
+    this.theirs.update(dt, theirTurn, WORLD_W, WORLD_H);
 
     if (!this.over) {
-      if (this.input.isDown('Space') && this.player.reload <= 0) {
-        this.fireBroadside(this.player, this.enemy, PLAYER_RELOAD);
+      if (this.input.isDown('Space') && this.mine.reload <= 0) {
+        this.fireBroadside(this.mine, this.theirs, PLAYER_RELOAD);
       }
-      if (wantsToFire(this.enemy, this.player) && this.enemy.reload <= 0) {
-        this.fireBroadside(this.enemy, this.player, ENEMY_RELOAD);
+      const theirsFires =
+        this.mode.kind === 'host'
+          ? this.remoteInput.fire
+          : wantsToFire(this.theirs, this.mine);
+      if (theirsFires && this.theirs.reload <= 0) {
+        this.fireBroadside(this.theirs, this.mine, this.mode.kind === 'host' ? PLAYER_RELOAD : ENEMY_RELOAD);
       }
     }
 
     for (const ball of this.cannonballs) {
       ball.update(dt);
-      const target = ball.owner === this.player ? this.enemy : this.player;
+      const target = ball.owner === this.mine ? this.theirs : this.mine;
       if (!ball.spent && target.alive && target.containsPoint(ball.x, ball.y)) {
         ball.spent = true;
         target.takeHit();
         this.explosions.push(new Explosion(ball.x, ball.y));
+        this.pendingBoom.push({ x: ball.x, y: ball.y });
       }
     }
     this.cannonballs = this.cannonballs.filter((b) => !b.spent);
 
     for (const ex of this.explosions) ex.update(dt);
     this.explosions = this.explosions.filter((ex) => !ex.done);
+
+    if (this.mode.kind === 'host') {
+      this.net!.send({
+        t: 'state',
+        ships: [this.snapOf(this.mine), this.snapOf(this.theirs)],
+        balls: this.cannonballs.map((b) => ({ x: b.x, y: b.y })),
+        boom: this.pendingBoom,
+      });
+      this.pendingBoom = [];
+    }
+  }
+
+  private updateSelect() {
+    if (this.myPick) return;
+    for (const [code, type] of Object.entries(SELECT_KEYS)) {
+      if (!this.input.isDown(code)) continue;
+      if (this.mode.kind === 'solo') {
+        const types = Object.keys(SHIP_TYPES) as ShipTypeName[];
+        this.startBattle(type, types[Math.floor(Math.random() * types.length)]);
+      } else {
+        this.myPick = type;
+        this.net!.send({ t: 'pick', ship: type });
+        if (this.mode.kind === 'host') this.tryStartHostBattle();
+      }
+      break;
+    }
   }
 
   /** Fire a volley from whichever side of the shooter faces the target. */
@@ -161,27 +296,32 @@ export class Game {
     this.drawSea();
     if (this.phase === 'select') {
       this.drawShipSelect();
-      return;
+    } else {
+      const ctx = this.ctx;
+      if (this.mode.kind === 'guest') {
+        for (const ball of this.remoteBalls) drawCannonball(ctx, ball.x, ball.y);
+      } else {
+        for (const ball of this.cannonballs) ball.draw(ctx);
+      }
+      this.mine.draw(ctx);
+      this.theirs.draw(ctx);
+      for (const ex of this.explosions) ex.draw(ctx);
+
+      const theirLabel = this.mode.kind === 'solo' ? 'Enemy' : 'Friend';
+      this.drawHealthRow(`You (${this.mine.type})`, this.mine, 0);
+      this.drawHealthRow(`${theirLabel} (${this.theirs.type})`, this.theirs, 1);
+
+      if (this.over) this.drawGameOver();
     }
 
-    const ctx = this.ctx;
-    for (const ball of this.cannonballs) ball.draw(ctx);
-    this.player.draw(ctx);
-    this.enemy.draw(ctx);
-    for (const ex of this.explosions) ex.draw(ctx);
-
-    this.drawHealthRow(`You (${this.player.type})`, this.player, 0);
-    this.drawHealthRow(`Enemy (${this.enemy.type})`, this.enemy, 1);
-
-    if (this.over) this.drawGameOver();
+    if (this.disconnected) this.drawDisconnected();
   }
 
   private drawSea() {
     const ctx = this.ctx;
-    const { width: w, height: h } = ctx.canvas;
 
     ctx.fillStyle = '#1a4d7a';
-    ctx.fillRect(0, 0, w, h);
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
 
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
     ctx.lineWidth = 1.5;
@@ -194,7 +334,8 @@ export class Game {
 
   private drawShipSelect() {
     const ctx = this.ctx;
-    const { width: w, height: h } = ctx.canvas;
+    const w = WORLD_W;
+    const h = WORLD_H;
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -204,13 +345,14 @@ export class Game {
     ctx.font = '22px system-ui, sans-serif';
     ctx.fillText('Choose your ship', w / 2, h * 0.18 + 44);
 
+    const color = this.mode.kind === 'guest' ? GUEST_COLOR : HOST_COLOR;
     const types = Object.keys(SHIP_TYPES) as ShipTypeName[];
     types.forEach((type, i) => {
       const stats = SHIP_TYPES[type];
       const x = w / 2 + (i - 1) * 230;
       const y = h * 0.5;
 
-      new Ship(x, y, -Math.PI / 2, PLAYER_COLOR, type).draw(ctx);
+      new Ship(x, y, -Math.PI / 2, color, type).draw(ctx);
 
       ctx.fillStyle = '#fff';
       ctx.textAlign = 'center';
@@ -223,7 +365,18 @@ export class Game {
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
     ctx.font = '17px system-ui, sans-serif';
-    ctx.fillText('Press 1, 2 or 3 to set sail — the enemy ship is chosen at random', w / 2, h * 0.82);
+    if (this.mode.kind === 'solo') {
+      ctx.fillText('Press 1, 2 or 3 to set sail — the enemy ship is chosen at random', w / 2, h * 0.82);
+    } else if (this.myPick) {
+      ctx.fillText(`You chose the ${this.myPick} ship — waiting for your friend…`, w / 2, h * 0.82);
+    } else {
+      ctx.fillText('Press 1, 2 or 3 to choose your ship', w / 2, h * 0.82);
+      ctx.fillText(
+        this.theirPick ? 'Your friend is ready!' : 'Your friend is still choosing…',
+        w / 2,
+        h * 0.82 + 28,
+      );
+    }
   }
 
   private drawHealthRow(label: string, ship: Ship, row: number) {
@@ -235,7 +388,7 @@ export class Game {
 
     const y = margin + row * (segH + 12);
     const totalW = ship.maxHealth * (segW + gap) - gap;
-    const x0 = ctx.canvas.width - margin - totalW;
+    const x0 = WORLD_W - margin - totalW;
 
     ctx.font = '13px system-ui, sans-serif';
     ctx.textAlign = 'right';
@@ -251,7 +404,8 @@ export class Game {
 
   private drawGameOver() {
     const ctx = this.ctx;
-    const { width: w, height: h } = ctx.canvas;
+    const w = WORLD_W;
+    const h = WORLD_H;
 
     ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
     ctx.fillRect(0, 0, w, h);
@@ -260,8 +414,32 @@ export class Game {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 42px system-ui, sans-serif';
-    ctx.fillText(this.enemy.alive ? 'Your ship was destroyed!' : 'Enemy ship destroyed!', w / 2, h / 2 - 20);
+    const won = this.mine.alive;
+    const title =
+      this.mode.kind === 'solo'
+        ? won
+          ? 'Enemy ship destroyed!'
+          : 'Your ship was destroyed!'
+        : won
+          ? 'Victory! You sank your friend!'
+          : 'Your ship was destroyed!';
+    ctx.fillText(title, w / 2, h / 2 - 20);
     ctx.font = '20px system-ui, sans-serif';
-    ctx.fillText('Press R for a new battle', w / 2, h / 2 + 24);
+    ctx.fillText(this.mode.kind === 'solo' ? 'Press R for a new battle' : 'Press R for a rematch', w / 2, h / 2 + 24);
+  }
+
+  private drawDisconnected() {
+    const ctx = this.ctx;
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 36px system-ui, sans-serif';
+    ctx.fillText('Connection lost', WORLD_W / 2, WORLD_H / 2 - 18);
+    ctx.font = '19px system-ui, sans-serif';
+    ctx.fillText('Refresh the page to start a new game.', WORLD_W / 2, WORLD_H / 2 + 22);
   }
 }

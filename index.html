@@ -7,6 +7,18 @@
   </head>
   <body>
     <canvas id="game"></canvas>
+    <div id="lobby">
+      <div id="lobby-panel">
+        <h1>Pirates: Naval Combat</h1>
+        <button id="solo-btn">Single player (vs AI)</button>
+        <button id="host-btn">Host a multiplayer game</button>
+        <div class="join-row">
+          <input id="code-input" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
+          <button id="join-btn">Join</button>
+        </div>
+        <p id="lobby-status"></p>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -3,7 +3,22 @@
 A top-down naval combat game for the browser, inspired by the ship battles in
 [Sid Meier's Pirates!](https://sidmeierspirates.fandom.com/wiki/Naval_Combat).
 Built with HTML5 Canvas and TypeScript — no game framework, no backend, the
-whole game runs in the front end.
+whole game runs in the front end. Play solo against the AI, or battle a friend
+over the internet with serverless peer-to-peer multiplayer.
+
+## Game modes
+
+- **Single player** — fight the AI captain, as before.
+- **Host a multiplayer game** — you get a 4-letter room code to share.
+- **Join** — enter a friend's room code to connect to their game.
+
+Multiplayer is peer-to-peer over WebRTC (via [PeerJS](https://peerjs.com)).
+There is no game server to run: PeerJS's free public broker is used only to
+exchange the initial connection handshake, after which all gameplay data flows
+directly between the two browsers. The host's browser is authoritative — it
+runs the full simulation and streams state snapshots to the guest every frame,
+while the guest sends back its steering and fire inputs, so the two screens
+can never drift out of sync.
 
 ## How to play
 
@@ -59,8 +74,10 @@ chosen at random each battle. All type stats live in one table
 ## Project structure
 
 ```
-src/main.ts        entry point: canvas setup, resize handling
-src/game.ts        game loop, ship select screen, firing, collisions, HUD
+src/main.ts        entry point: canvas setup/scaling, lobby UI wiring
+src/game.ts        game loop, ship select screen, firing, collisions, HUD,
+                   solo/host/guest mode logic
+src/net.ts         PeerJS wrapper: room codes, connection, message types
 src/ship.ts        Ship class + SHIP_TYPES stat table
 src/ai.ts          enemy steering and fire decisions
 src/cannonball.ts  projectile movement and rendering
@@ -75,6 +92,11 @@ npm install
 npm run dev      # dev server with hot reload at http://localhost:5173
 npm run build    # type-check and build static files into dist/
 ```
+
+Requires Node 20.19+ or 22.12+ (Vite 8). `e2e-test.mjs` is a Playwright smoke
+test that opens two headless browsers, connects them through the real PeerJS
+broker, and plays a few seconds of a match — run it with `npm run preview`
+serving `dist/` on port 4173, then `node e2e-test.mjs`.
 
 ## Deployment
 

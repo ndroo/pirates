@@ -14,4 +14,13 @@ export class Input {
   isDown(code: string): boolean {
     return this.down.has(code);
   }
+
+  /** Touch controls: hold/release a synthetic key. */
+  press(code: string) {
+    this.down.add(code);
+  }
+
+  release(code: string) {
+    this.down.delete(code);
+  }
 }

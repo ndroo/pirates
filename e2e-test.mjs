@@ -1,6 +1,6 @@
 // Smoke test: a 3-player match via the real PeerJS broker, plus rejection of
 // duplicate-device and over-capacity joins.
-import { chromium } from 'playwright';
+import { chromium, devices } from 'playwright';
 
 const GAME_URL = process.env.GAME_URL || 'http://localhost:4173/';
 
@@ -270,6 +270,54 @@ for (let k = 0; k < 8; k++) {
 }
 if (groundings > 0) throw new Error(`AI ran aground ${groundings}/8 times`);
 console.log('AI dodged islands 8/8 ✓');
+
+// --- Mobile: tap to pick a ship, on-screen buttons steer and fire. ---
+const phoneCtx = await browser.newContext({ ...devices['iPhone 13'] });
+const phone = await phoneCtx.newPage();
+phone.on('pageerror', (e) => console.log('[phone:ERR]', e.message));
+await phone.goto(GAME_URL);
+await phone.tap('#solo-btn');
+await phone.waitForSelector('#lobby', { state: 'detached', timeout: 10000 });
+
+const canvasBox = await phone.locator('canvas').boundingBox();
+await phone.tap('canvas', { position: { x: canvasBox.width / 2, y: canvasBox.height / 2 } }); // middle card
+await phone.waitForFunction(() => window.__game.phase === 'battle', null, { timeout: 5000 });
+console.log('mobile: tapped a ship card into battle ✓');
+
+if (!(await phone.isVisible('#tc-fire'))) throw new Error('touch controls not shown on phone');
+
+await phone.locator('#tc-fire').dispatchEvent('pointerdown');
+await phone.waitForTimeout(400);
+const fired = await phone.evaluate(() => window.__game.cannonballs.length > 0);
+await phone.locator('#tc-fire').dispatchEvent('pointerup');
+if (!fired) throw new Error('FIRE button produced no cannonballs');
+
+const h0 = await phone.evaluate(() => window.__game.slots[0].ship.heading);
+await phone.locator('#tc-left').dispatchEvent('pointerdown');
+await phone.waitForTimeout(500);
+const h1 = await phone.evaluate(() => window.__game.slots[0].ship.heading);
+await phone.locator('#tc-left').dispatchEvent('pointerup');
+if (h1 >= h0) throw new Error(`steer button did not turn the ship (${h0} -> ${h1})`);
+console.log('mobile: FIRE and steer buttons work ✓');
+
+// Tap-to-restart from game over.
+await phone.evaluate(() => {
+  window.__game.slots[1].ship.health = 0; // sink the AI: game over
+});
+await phone.waitForTimeout(300);
+await phone.tap('canvas', { position: { x: canvasBox.width / 2, y: canvasBox.height / 2 } });
+await phone.waitForFunction(() => window.__game.phase === 'select', null, { timeout: 5000 });
+console.log('mobile: tap-to-restart works ✓');
+await phoneCtx.close();
+
+// --- Invite screen offers a solo escape hatch. ---
+const loner = await newPlayer('loner', { width: 1000, height: 700 });
+await loner.goto(`${GAME_URL}?join=ZZZZ`);
+await loner.click('#invite-solo-btn');
+await loner.waitForSelector('#lobby', { state: 'detached', timeout: 5000 });
+const cleanUrl = await loner.evaluate(() => location.search);
+if (cleanUrl.includes('join')) throw new Error('solo escape left ?join in the URL');
+console.log('invite screen solo escape ✓');
 
 await browser.close();
 console.log('done');

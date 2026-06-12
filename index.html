@@ -2,11 +2,18 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Pirates: Naval Combat</title>
   </head>
   <body>
     <canvas id="game"></canvas>
+    <div id="touch-controls" hidden>
+      <div class="steer">
+        <button id="tc-left">◀</button>
+        <button id="tc-right">▶</button>
+      </div>
+      <button id="tc-fire">FIRE</button>
+    </div>
     <div id="lobby">
       <div id="lobby-panel">
         <h1>Pirates: Naval Combat</h1>
@@ -44,6 +51,7 @@
         <div class="screen" id="screen-invite" hidden>
           <p class="invite-text">You're invited to a sea battle!</p>
           <button id="invite-join-btn">Join the battle</button>
+          <button id="invite-solo-btn" class="subtle">No thanks — play solo instead</button>
         </div>
 
         <div class="screen" id="screen-wait" hidden>

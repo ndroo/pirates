@@ -47,6 +47,9 @@ interface Wave {
   r: number;
 }
 
+// Phones get touch controls and tap-flavored hint text.
+const TOUCH = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
+
 /** One player (or the solo AI) in the match. */
 interface Slot {
   id: number; // 0 = host; shown by name, or "Player <id + 1>" if unnamed
@@ -101,6 +104,7 @@ export class Game {
   private readyInfo: { ready: number; total: number } | null = null; // guest: select progress
   private disconnected = false;
   private kicked = false;
+  private tapRestart = false; // tap-on-game-over stands in for the R key
 
   constructor(ctx: CanvasRenderingContext2D, input: Input, mode: GameMode = { kind: 'solo' }) {
     this.ctx = ctx;
@@ -127,6 +131,7 @@ export class Game {
       };
     }
     this.buildSlots();
+    ctx.canvas.addEventListener('pointerdown', (e) => this.onTap(e));
 
     for (let i = 0; i < 40; i++) {
       this.waves.push({
@@ -134,6 +139,22 @@ export class Game {
         y: Math.random() * WORLD_H,
         r: 6 + Math.random() * 10,
       });
+    }
+  }
+
+  /** Taps pick a ship on the select screen and restart after game over. */
+  private onTap(e: PointerEvent) {
+    const rect = this.ctx.canvas.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * WORLD_W;
+    const y = ((e.clientY - rect.top) / rect.height) * WORLD_H;
+
+    if (this.phase === 'select' && !this.myPick) {
+      (Object.keys(SHIP_TYPES) as ShipTypeName[]).forEach((type, i) => {
+        const cx = WORLD_W / 2 + (i - 1) * 230;
+        if (Math.abs(x - cx) < 105 && Math.abs(y - WORLD_H * 0.5) < 110) this.pick(type);
+      });
+    } else if (this.phase === 'battle' && this.over) {
+      this.tapRestart = true;
     }
   }
 
@@ -275,6 +296,7 @@ export class Game {
   private resetToSelect() {
     this.phase = 'select';
     this.myPick = null;
+    this.tapRestart = false;
     this.readyInfo = null;
     this.cannonballs = [];
     this.remoteBalls = [];
@@ -372,35 +394,57 @@ export class Game {
   }
 
   /**
-   * Steer the AI around islands. Checks whether any island overlaps the
-   * corridor the ship will sail through in the next ~140 px, and once a
-   * dodge starts, commits to that turn direction until the course is clear —
-   * otherwise the chase steering immediately pulls the bow back toward the
-   * island and the ship dithers its way onto the rocks.
+   * How far the ship can sail holding `turn` before grounding on an island,
+   * simulated with its real speed and turn rate. Infinity = clear horizon.
    */
-  private avoidIslands(slot: Slot, ship: Ship): Turn | null {
-    const fx = Math.cos(ship.heading);
-    const fy = Math.sin(ship.heading);
-    const LOOK = 140;
-    const CLEARANCE = 45;
-
-    let nearest: { side: number; along: number } | null = null;
-    for (const isl of this.islands) {
-      const dx = isl.x - ship.x;
-      const dy = isl.y - ship.y;
-      const along = dx * fx + dy * fy; // forward distance to the island center
-      if (along < -isl.r || along > LOOK + isl.r) continue;
-      const lateral = fx * dy - fy * dx; // signed offset from our course line
-      if (Math.abs(lateral) > isl.r + CLEARANCE) continue;
-      if (!nearest || along < nearest.along) nearest = { side: Math.sign(lateral) || 1, along };
+  private pathClearance(ship: Ship, turn: Turn, horizon = 2.4): number {
+    const step = 0.12;
+    let x = ship.x;
+    let y = ship.y;
+    let h = ship.heading;
+    let traveled = 0;
+    for (let t = 0; t < horizon; t += step) {
+      h += turn * ship.turnRate * step;
+      x += Math.cos(h) * ship.speed * step;
+      y += Math.sin(h) * ship.speed * step;
+      x = ((x % WORLD_W) + WORLD_W) % WORLD_W; // mirror the world wrap
+      y = ((y % WORLD_H) + WORLD_H) % WORLD_H;
+      traveled += ship.speed * step;
+      for (const isl of this.islands) {
+        if (Math.hypot(x - isl.x, y - isl.y) < isl.r + ship.width / 2 + 12) return traveled;
+      }
     }
+    return Infinity;
+  }
 
-    if (!nearest) {
-      slot.avoid = 0;
-      return null;
+  /**
+   * AI steering: take the chase turn if its whole arc is island-free;
+   * otherwise stick with the committed dodge, then try the remaining turn
+   * options, and failing all, the option that grounds furthest away. Arc
+   * simulation (not a look-ahead cone) is what keeps a dodge from sweeping
+   * the ship into a *different* island behind its turn.
+   */
+  private aiTurn(slot: Slot, ship: Ship, target: Ship | null): Turn {
+    const chase: Turn = !this.over && target ? decideTurn(ship, target) : 0;
+    const candidates: Turn[] = [chase];
+    if (slot.avoid !== 0 && !candidates.includes(slot.avoid)) candidates.push(slot.avoid);
+    for (const t of [0, -1, 1] as Turn[]) if (!candidates.includes(t)) candidates.push(t);
+
+    let best = chase;
+    let bestDist = -1;
+    for (const t of candidates) {
+      const d = this.pathClearance(ship, t);
+      if (d === Infinity) {
+        slot.avoid = t === chase ? 0 : t;
+        return t;
+      }
+      if (d > bestDist) {
+        bestDist = d;
+        best = t;
+      }
     }
-    if (slot.avoid === 0) slot.avoid = nearest.side > 0 ? -1 : 1; // turn away from the island's side
-    return slot.avoid;
+    slot.avoid = best === chase ? 0 : best;
+    return best;
   }
 
   private nearestEnemy(ship: Ship): Ship | null {
@@ -449,7 +493,7 @@ export class Game {
         t: 'input',
         turn,
         fire: this.input.isDown('Space'),
-        restart: this.over && this.input.isDown('KeyR'),
+        restart: this.over && (this.input.isDown('KeyR') || this.tapRestart),
       });
       // The host simulates; we just animate our local explosion effects.
       for (const ex of this.explosions) ex.update(dt);
@@ -457,7 +501,10 @@ export class Game {
       return;
     }
 
-    if (this.over && (this.input.isDown('KeyR') || this.slots.some((s) => s.input.restart))) {
+    if (
+      this.over &&
+      (this.input.isDown('KeyR') || this.tapRestart || this.slots.some((s) => s.input.restart))
+    ) {
       this.resetToSelect();
       return;
     }
@@ -481,7 +528,7 @@ export class Game {
         fire = this.input.isDown('Space');
       } else if (slot.ai) {
         const target = this.nearestEnemy(ship);
-        shipTurn = this.avoidIslands(slot, ship) ?? (!this.over && target ? decideTurn(ship, target) : 0);
+        shipTurn = this.aiTurn(slot, ship, target);
         fire = !this.over && target ? wantsToFire(ship, target) : false;
       } else {
         shipTurn = slot.input.turn;
@@ -558,24 +605,30 @@ export class Game {
     }
   }
 
+  private pick(type: ShipTypeName) {
+    if (this.phase !== 'select' || this.myPick) return;
+    this.myPick = type;
+    if (this.mode.kind === 'guest') {
+      this.mode.net.send({ t: 'pick', ship: type });
+      return;
+    }
+    const self = this.selfSlot;
+    if (self) self.pick = type;
+    if (this.mode.kind === 'solo') {
+      const types = Object.keys(SHIP_TYPES) as ShipTypeName[];
+      this.slots.find((s) => s.ai)!.pick = types[Math.floor(Math.random() * types.length)];
+    }
+    this.broadcastPicked();
+    this.maybeStartBattle();
+  }
+
   private updateSelect() {
     if (this.myPick) return;
     for (const [code, type] of Object.entries(SELECT_KEYS)) {
-      if (!this.input.isDown(code)) continue;
-      this.myPick = type;
-      if (this.mode.kind === 'guest') {
-        this.mode.net.send({ t: 'pick', ship: type });
-      } else {
-        const self = this.selfSlot;
-        if (self) self.pick = type;
-        if (this.mode.kind === 'solo') {
-          const types = Object.keys(SHIP_TYPES) as ShipTypeName[];
-          this.slots.find((s) => s.ai)!.pick = types[Math.floor(Math.random() * types.length)];
-        }
-        this.broadcastPicked();
-        this.maybeStartBattle();
+      if (this.input.isDown(code)) {
+        this.pick(type);
+        break;
       }
-      break;
     }
   }
 
@@ -732,15 +785,14 @@ export class Game {
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
     ctx.font = '17px system-ui, sans-serif';
+    const howToPick = TOUCH ? 'Tap a ship to choose it' : 'Press 1, 2 or 3 to choose your ship';
     if (this.mode.kind === 'solo') {
-      ctx.fillText('Press 1, 2 or 3 to set sail — the enemy ship is chosen at random', w / 2, h * 0.82);
+      ctx.fillText(`${howToPick} — the enemy ship is chosen at random`, w / 2, h * 0.82);
       return;
     }
 
     ctx.fillText(
-      this.myPick
-        ? `You chose the ${this.myPick} ship — waiting for the other captains…`
-        : 'Press 1, 2 or 3 to choose your ship',
+      this.myPick ? `You chose the ${this.myPick} ship — waiting for the other captains…` : howToPick,
       w / 2,
       h * 0.82,
     );
@@ -827,7 +879,8 @@ export class Game {
     }
     ctx.fillText(title, w / 2, h / 2 - 20);
     ctx.font = '20px system-ui, sans-serif';
-    ctx.fillText(this.mode.kind === 'solo' ? 'Press R for a new battle' : 'Press R for a rematch', w / 2, h / 2 + 24);
+    const again = this.mode.kind === 'solo' ? 'new battle' : 'rematch';
+    ctx.fillText(TOUCH ? `Tap the screen for a ${again}` : `Press R for a ${again}`, w / 2, h / 2 + 24);
   }
 
   private drawDisconnected() {

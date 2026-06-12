@@ -81,10 +81,37 @@ function setBusy(busy: boolean) {
 
 function startGame(mode: GameMode): Game {
   lobby.remove();
-  const game = new Game(ctx, new Input(), mode);
+  const input = new Input();
+  enableTouchControls(input);
+  const game = new Game(ctx, input, mode);
   (window as { __game?: Game }).__game = game; // for the e2e smoke test
   game.start();
   return game;
+}
+
+/** On-screen steer/fire buttons for touch devices, feeding the key state. */
+function enableTouchControls(input: Input) {
+  if (!matchMedia('(pointer: coarse)').matches) return;
+  const controls = document.getElementById('touch-controls') as HTMLDivElement;
+  controls.hidden = false;
+  const bind = (id: string, code: string) => {
+    const el = document.getElementById(id)!;
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+        // synthetic events have no active pointer; holding still works
+      }
+      input.press(code);
+    });
+    for (const ev of ['pointerup', 'pointercancel'] as const) {
+      el.addEventListener(ev, () => input.release(code));
+    }
+  };
+  bind('tc-left', 'ArrowLeft');
+  bind('tc-right', 'ArrowRight');
+  bind('tc-fire', 'Space');
 }
 
 /** In-game admin controls, shown only on the host's screen. */
@@ -288,6 +315,10 @@ async function join(retriesLeft = 0) {
 
 joinBtn.addEventListener('click', () => join());
 inviteJoinBtn.addEventListener('click', () => join());
+document.getElementById('invite-solo-btn')!.addEventListener('click', () => {
+  history.replaceState(null, '', location.pathname); // drop ?join so a refresh isn't an invite
+  startGame({ kind: 'solo' });
+});
 codeInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') join();
 });

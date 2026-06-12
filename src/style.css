@@ -14,6 +14,56 @@ body {
 
 canvas {
   display: block;
+  touch-action: none;
+}
+
+#touch-controls {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+
+#touch-controls[hidden] {
+  display: none;
+}
+
+#touch-controls button {
+  pointer-events: auto;
+  position: fixed;
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  width: 74px;
+  height: 74px;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 26px;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#touch-controls button:active {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+#tc-left {
+  left: calc(18px + env(safe-area-inset-left));
+}
+
+#tc-right {
+  left: calc(108px + env(safe-area-inset-left));
+}
+
+#tc-fire {
+  right: calc(18px + env(safe-area-inset-right));
+  width: 92px;
+  height: 92px;
+  font-size: 18px;
+  font-weight: 700;
+  background: rgba(160, 66, 31, 0.55);
 }
 
 #lobby {

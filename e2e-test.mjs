@@ -1,7 +1,7 @@
 // Smoke test: two browsers play a multiplayer match via the real PeerJS broker.
 import { chromium } from 'playwright';
 
-const URL = 'http://localhost:4173/';
+const URL = process.env.GAME_URL || 'http://localhost:4173/';
 
 const browser = await chromium.launch();
 const host = await browser.newPage({ viewport: { width: 1300, height: 760 } });

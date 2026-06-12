@@ -82,19 +82,50 @@ canvas {
   flex: 1;
 }
 
-.host-options {
+.screen {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.screen[hidden] {
+  display: none;
+}
+
+.divider {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 18px;
+  gap: 10px;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 13px;
+}
+
+.divider::before,
+.divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.invite-text {
+  margin: 0;
+  font-size: 18px;
+}
+
+.host-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   font-size: 14px;
-  margin-top: 6px;
+  padding: 0 2px;
 }
 
 .host-options label {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .host-options select {

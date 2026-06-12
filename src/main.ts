@@ -22,21 +22,32 @@ window.addEventListener('resize', resize);
 const lobby = document.getElementById('lobby')!;
 const status = document.getElementById('lobby-status')!;
 const soloBtn = document.getElementById('solo-btn') as HTMLButtonElement;
+const multiBtn = document.getElementById('multi-btn') as HTMLButtonElement;
+const backBtn = document.getElementById('back-btn') as HTMLButtonElement;
 const hostBtn = document.getElementById('host-btn') as HTMLButtonElement;
 const joinBtn = document.getElementById('join-btn') as HTMLButtonElement;
+const inviteJoinBtn = document.getElementById('invite-join-btn') as HTMLButtonElement;
 const codeInput = document.getElementById('code-input') as HTMLInputElement;
 const capSelect = document.getElementById('cap-select') as HTMLSelectElement;
 const modeSelect = document.getElementById('mode-select') as HTMLSelectElement;
 const ipCheck = document.getElementById('ip-check') as HTMLInputElement;
-const shareRow = document.getElementById('share-row') as HTMLDivElement;
 const shareLink = document.getElementById('share-link') as HTMLInputElement;
 const copyBtn = document.getElementById('copy-btn') as HTMLButtonElement;
-const waitRoom = document.getElementById('wait-room') as HTMLDivElement;
 const playerCount = document.getElementById('player-count') as HTMLParagraphElement;
 const playerList = document.getElementById('player-list') as HTMLDivElement;
 const startBtn = document.getElementById('start-btn') as HTMLButtonElement;
 const closeRoomBtn = document.getElementById('close-room-btn') as HTMLButtonElement;
 const nameInput = document.getElementById('name-input') as HTMLInputElement;
+const screenInvite = document.getElementById('screen-invite') as HTMLDivElement;
+
+// The lobby is a stack of screens; show one (or none, status text only).
+const screens = [...document.querySelectorAll<HTMLDivElement>('#lobby-panel .screen')];
+function showScreen(id: string | null) {
+  for (const s of screens) s.hidden = s.id !== id;
+}
+
+multiBtn.addEventListener('click', () => showScreen('screen-multi'));
+backBtn.addEventListener('click', () => showScreen('screen-home'));
 
 // Remember the player's name across visits, and the host's room across
 // refreshes (sessionStorage = this tab only), so a host reload doesn't
@@ -58,8 +69,10 @@ for (let n = 2; n <= 16; n++) {
 
 function setBusy(busy: boolean) {
   soloBtn.disabled = busy;
+  multiBtn.disabled = busy;
   hostBtn.disabled = busy;
   joinBtn.disabled = busy;
+  inviteJoinBtn.disabled = busy;
   codeInput.disabled = busy;
   capSelect.disabled = busy;
   modeSelect.disabled = busy;
@@ -190,8 +203,7 @@ async function openRoom(restoreCode?: string) {
     );
 
     shareLink.value = `${location.origin}${location.pathname}?join=${net.code}`;
-    shareRow.hidden = false;
-    waitRoom.hidden = false;
+    showScreen('screen-wait');
     status.textContent = `Room code: ${net.code} — send your friends the invite link.`;
     copyShareLink();
 
@@ -245,6 +257,7 @@ async function join(retriesLeft = 0) {
   if (!retriesLeft) status.textContent = 'Connecting…';
   try {
     const { net, players, cap } = await joinGame(code, myName());
+    showScreen(null); // joined: nothing left to configure, status says it all
     const waiting = (n: number, c: number) =>
       (status.textContent = `Joined! ${n}/${c} players aboard — waiting for the host to start…`);
     waiting(players, cap);
@@ -274,6 +287,7 @@ async function join(retriesLeft = 0) {
 }
 
 joinBtn.addEventListener('click', () => join());
+inviteJoinBtn.addEventListener('click', () => join());
 codeInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') join();
 });
@@ -285,14 +299,17 @@ if (inviteCode) {
   // Opened via an invite link (?join=CODE). Join directly when reconnecting
   // (&rejoin=1, set when a game connection drops — keep retrying while the
   // host's room comes back up) or when this player already has a saved name;
-  // otherwise give them a chance to enter one first.
+  // otherwise show the slim invite screen so they can enter one first.
   codeInput.value = inviteCode;
   if (params.get('rejoin')) {
+    showScreen(null);
     join(10);
   } else if (localStorage.getItem(NAME_KEY)) {
+    showScreen(null);
     join();
   } else {
-    status.textContent = 'Enter your name (optional), then press Join.';
+    screenInvite.insertBefore(nameInput, inviteJoinBtn);
+    showScreen('screen-invite');
     nameInput.focus();
   }
 } else if (savedRoom) {

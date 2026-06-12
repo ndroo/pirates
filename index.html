@@ -10,38 +10,53 @@
     <div id="lobby">
       <div id="lobby-panel">
         <h1>Pirates: Naval Combat</h1>
-        <input id="name-input" maxlength="14" placeholder="Your name (optional)" autocomplete="off" spellcheck="false" />
-        <button id="solo-btn">Single player (vs AI)</button>
-        <div class="host-options">
-          <label>Max players
-            <select id="cap-select"></select>
-          </label>
-          <label>Mode
-            <select id="mode-select">
-              <option value="elimination" selected>Last ship standing</option>
-              <option value="respawn">Respawns — first to 5 sinks</option>
-            </select>
-          </label>
-          <label class="checkbox">
-            <input type="checkbox" id="ip-check" />
-            Block same-network joins
-          </label>
+
+        <div class="screen" id="screen-home">
+          <button id="solo-btn">Single player</button>
+          <button id="multi-btn">Multiplayer</button>
         </div>
-        <button id="host-btn">Host a multiplayer game</button>
-        <div class="join-row">
-          <input id="code-input" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
-          <button id="join-btn">Join</button>
+
+        <div class="screen" id="screen-multi" hidden>
+          <input id="name-input" maxlength="14" placeholder="Your name (optional)" autocomplete="off" spellcheck="false" />
+          <div class="host-options">
+            <label>Max players
+              <select id="cap-select"></select>
+            </label>
+            <label>Mode
+              <select id="mode-select">
+                <option value="elimination" selected>Last ship standing</option>
+                <option value="respawn">Respawns — first to 5 sinks</option>
+              </select>
+            </label>
+            <label>Block same-network joins
+              <input type="checkbox" id="ip-check" />
+            </label>
+          </div>
+          <button id="host-btn">Host a game</button>
+          <div class="divider"><span>or join a friend</span></div>
+          <div class="join-row">
+            <input id="code-input" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
+            <button id="join-btn">Join</button>
+          </div>
+          <button id="back-btn" class="subtle">Back</button>
         </div>
-        <div class="join-row" id="share-row" hidden>
-          <input id="share-link" readonly />
-          <button id="copy-btn">Copy</button>
+
+        <div class="screen" id="screen-invite" hidden>
+          <p class="invite-text">You're invited to a sea battle!</p>
+          <button id="invite-join-btn">Join the battle</button>
         </div>
-        <div id="wait-room" hidden>
+
+        <div class="screen" id="screen-wait" hidden>
+          <div class="join-row">
+            <input id="share-link" readonly />
+            <button id="copy-btn">Copy</button>
+          </div>
           <p id="player-count"></p>
           <div id="player-list"></div>
           <button id="start-btn" disabled>Start battle</button>
           <button id="close-room-btn" class="subtle">Close room</button>
         </div>
+
         <p id="lobby-status"></p>
       </div>
     </div>

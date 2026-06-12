@@ -25,17 +25,18 @@ async function hold(page, key, ms = 150) {
 }
 
 // Open an invite link and join, entering a name first when given one.
-// (With a previously saved name the page auto-joins and disables the button.)
+// (With a previously saved name the page auto-joins and skips the screen.)
 async function joinVia(page, link, name) {
   await page.goto(link);
-  if (name) await page.fill('#name-input', name);
-  const btn = page.locator('#join-btn');
-  if (await btn.isEnabled().catch(() => false)) await btn.click().catch(() => {});
+  if (name) await page.fill('#name-input', name).catch(() => {});
+  const btn = page.locator('#invite-join-btn');
+  if (await btn.isVisible().catch(() => false)) await btn.click().catch(() => {});
 }
 
 const host = await newPlayer('host', { width: 1300, height: 760 });
 await host.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(GAME_URL).origin });
 await host.goto(GAME_URL);
+await host.click('#multi-btn');
 await host.selectOption('#cap-select', '3');
 await host.click('#host-btn');
 await host.waitForFunction(statusIncludes('Room code'), null, { timeout: 20000 });
@@ -100,6 +101,7 @@ console.log('elimination round OK');
 // --- scores a point, and the victim reappears.                      ---
 const host2 = await newPlayer('host2', { width: 1300, height: 760 });
 await host2.goto(GAME_URL);
+await host2.click('#multi-btn');
 await host2.fill('#name-input', 'Blackbeard');
 await host2.selectOption('#cap-select', '2');
 await host2.selectOption('#mode-select', 'respawn');

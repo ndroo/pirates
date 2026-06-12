@@ -24,8 +24,8 @@ export const PLAYER_COLORS = [
 
 export type GameMode =
   | { kind: 'solo' }
-  | { kind: 'host'; net: HostNet; battle: BattleMode }
-  | { kind: 'guest'; net: GuestNet };
+  | { kind: 'host'; net: HostNet; battle: BattleMode; name: string }
+  | { kind: 'guest'; net: GuestNet; code: string };
 
 const SELECT_KEYS: Record<string, ShipTypeName> = {
   Digit1: 'small',
@@ -47,7 +47,8 @@ interface Wave {
 
 /** One player (or the solo AI) in the match. */
 interface Slot {
-  id: number; // 0 = host; shown as "Player <id + 1>"
+  id: number; // 0 = host; shown by name, or "Player <id + 1>" if unnamed
+  name: string; // '' = unnamed
   color: string;
   ai: boolean;
   pick: ShipTypeName | null;
@@ -58,9 +59,10 @@ interface Slot {
   left: boolean; // disconnected mid-battle; never respawns
 }
 
-function newSlot(id: number, ai = false): Slot {
+function newSlot(id: number, name = '', ai = false): Slot {
   return {
     id,
+    name,
     color: PLAYER_COLORS[id % PLAYER_COLORS.length],
     ai,
     pick: null,
@@ -109,6 +111,14 @@ export class Game {
       mode.net.onMessage = (msg) => this.handleHostMessage(msg);
       mode.net.onClose = () => {
         this.disconnected = true;
+        // The host may just be refreshing their page — the room code survives
+        // that, so try to rejoin (the lobby retries for a while). Not if we
+        // were kicked, of course.
+        if (!this.kicked) {
+          setTimeout(() => {
+            location.href = `${location.pathname}?join=${mode.code}&rejoin=1`;
+          }, 1500);
+        }
       };
     }
     this.buildSlots();
@@ -125,9 +135,10 @@ export class Game {
   /** Roster for the next battle. Guests get theirs from the start message. */
   private buildSlots() {
     if (this.mode.kind === 'solo') {
-      this.slots = [newSlot(0), newSlot(1, true)];
+      this.slots = [newSlot(0), newSlot(1, '', true)];
     } else if (this.mode.kind === 'host') {
-      this.slots = [newSlot(0), ...this.mode.net.guestIds.map((id) => newSlot(id))];
+      const net = this.mode.net;
+      this.slots = [newSlot(0, this.mode.name), ...net.guestIds.map((id) => newSlot(id, net.guestName(id)))];
     } else {
       this.slots = [];
     }
@@ -210,7 +221,7 @@ export class Game {
         this.battleMode = msg.mode;
         this.target = msg.target;
         this.slots = msg.ships.map((sp) => {
-          const slot = newSlot(sp.id);
+          const slot = newSlot(sp.id, sp.name);
           slot.pick = sp.type;
           slot.ship = new Ship(sp.x, sp.y, sp.heading, slot.color, sp.type);
           return slot;
@@ -310,6 +321,7 @@ export class Game {
         target: this.target,
         ships: this.slots.map((s) => ({
           id: s.id,
+          name: s.name,
           type: s.pick!,
           x: s.ship!.x,
           y: s.ship!.y,
@@ -534,7 +546,7 @@ export class Game {
   private slotLabel(slot: Slot): string {
     if (slot.id === this.selfId) return 'You';
     if (slot.ai) return 'Enemy';
-    return `Player ${slot.id + 1}`;
+    return slot.name || `Player ${slot.id + 1}`;
   }
 
   /** Small name tag above each afloat ship so players can find themselves. */
@@ -546,7 +558,8 @@ export class Game {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     ctx.fillStyle = slot.id === this.selfId ? '#fff' : 'rgba(255, 255, 255, 0.65)';
-    ctx.fillText(slot.id === this.selfId ? 'You' : `P${slot.id + 1}`, ship.x, ship.y - ship.length / 2 - 8);
+    const tag = slot.id === this.selfId ? 'You' : slot.name.slice(0, 10) || `P${slot.id + 1}`;
+    ctx.fillText(tag, ship.x, ship.y - ship.length / 2 - 8);
   }
 
   private drawSea() {

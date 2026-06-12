@@ -1,6 +1,6 @@
 import { Game, WORLD_H, WORLD_W, type GameMode } from './game';
 import { Input } from './input';
-import { hostGame, joinGame, type BattleMode } from './net';
+import { cleanName, hostGame, joinGame, type BattleMode } from './net';
 import './style.css';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -35,6 +35,17 @@ const waitRoom = document.getElementById('wait-room') as HTMLDivElement;
 const playerCount = document.getElementById('player-count') as HTMLParagraphElement;
 const playerList = document.getElementById('player-list') as HTMLDivElement;
 const startBtn = document.getElementById('start-btn') as HTMLButtonElement;
+const closeRoomBtn = document.getElementById('close-room-btn') as HTMLButtonElement;
+const nameInput = document.getElementById('name-input') as HTMLInputElement;
+
+// Remember the player's name across visits, and the host's room across
+// refreshes (sessionStorage = this tab only), so a host reload doesn't
+// strand the guests: the room comes back under the same code.
+const NAME_KEY = 'pirates-name';
+const ROOM_KEY = 'pirates-room';
+nameInput.value = localStorage.getItem(NAME_KEY) ?? '';
+nameInput.addEventListener('change', () => localStorage.setItem(NAME_KEY, cleanName(nameInput.value)));
+const myName = () => cleanName(nameInput.value);
 
 // 2–16 players; beyond that a browser host's WebRTC connections get shaky.
 for (let n = 2; n <= 16; n++) {
@@ -101,6 +112,8 @@ function buildHostPanel(game: Game, initialMode: BattleMode) {
   const applyRules = () => {
     targetSel.disabled = modeSel.value === 'elimination';
     game.setRules(modeSel.value as BattleMode, Number(targetSel.value));
+    const saved = sessionStorage.getItem(ROOM_KEY);
+    if (saved) sessionStorage.setItem(ROOM_KEY, JSON.stringify({ ...JSON.parse(saved), mode: modeSel.value }));
   };
   modeSel.addEventListener('change', applyRules);
   targetSel.addEventListener('change', applyRules);
@@ -151,11 +164,30 @@ copyBtn.addEventListener('click', copyShareLink);
 
 soloBtn.addEventListener('click', () => startGame({ kind: 'solo' }));
 
-hostBtn.addEventListener('click', async () => {
+async function openRoom(restoreCode?: string) {
   setBusy(true);
-  status.textContent = 'Creating room…';
+  status.textContent = restoreCode ? `Restoring room ${restoreCode}…` : 'Creating room…';
   try {
-    const net = await hostGame({ cap: Number(capSelect.value), blockSameIp: ipCheck.checked });
+    const opts = { cap: Number(capSelect.value), blockSameIp: ipCheck.checked, code: restoreCode };
+    let net;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        net = await hostGame(opts);
+        break;
+      } catch (err) {
+        // Right after a refresh the broker may briefly still hold our old
+        // registration for this code — wait it out.
+        const taken = err instanceof Error && err.message.includes('is taken');
+        if (!restoreCode || !taken || attempt >= 6) throw err;
+        status.textContent = `Restoring room ${restoreCode}… (attempt ${attempt + 1})`;
+        await new Promise((r) => setTimeout(r, 2500));
+      }
+    }
+
+    sessionStorage.setItem(
+      ROOM_KEY,
+      JSON.stringify({ code: net.code, cap: net.cap, blockSameIp: ipCheck.checked, mode: modeSelect.value }),
+    );
 
     shareLink.value = `${location.origin}${location.pathname}?join=${net.code}`;
     shareRow.hidden = false;
@@ -171,7 +203,7 @@ hostBtn.addEventListener('click', async () => {
           const row = document.createElement('div');
           row.className = 'player-row';
           const name = document.createElement('span');
-          name.textContent = `Player ${id + 1}`;
+          name.textContent = net.guestName(id) || `Player ${id + 1}`;
           const kick = document.createElement('button');
           kick.textContent = 'Kick';
           kick.className = 'kick-btn';
@@ -188,49 +220,91 @@ hostBtn.addEventListener('click', async () => {
     startBtn.addEventListener('click', () => {
       net.markStarted();
       net.broadcast({ t: 'go-select' });
-      const game = startGame({ kind: 'host', net, battle: modeSelect.value as BattleMode });
+      const game = startGame({ kind: 'host', net, battle: modeSelect.value as BattleMode, name: myName() });
       buildHostPanel(game, modeSelect.value as BattleMode);
     });
   } catch (err) {
     status.textContent = describeError(err);
     setBusy(false);
   }
+}
+
+hostBtn.addEventListener('click', () => openRoom());
+closeRoomBtn.addEventListener('click', () => {
+  sessionStorage.removeItem(ROOM_KEY);
+  location.href = location.pathname;
 });
 
-async function join() {
+async function join(retriesLeft = 0) {
   const code = codeInput.value.trim().toUpperCase();
   if (code.length !== 4) {
     status.textContent = 'Enter the 4-letter room code from your friend.';
     return;
   }
   setBusy(true);
-  status.textContent = 'Connecting…';
+  if (!retriesLeft) status.textContent = 'Connecting…';
   try {
-    const { net, players, cap } = await joinGame(code);
+    const { net, players, cap } = await joinGame(code, myName());
     const waiting = (n: number, c: number) =>
       (status.textContent = `Joined! ${n}/${c} players aboard — waiting for the host to start…`);
     waiting(players, cap);
+    let kicked = false;
     net.onMessage = (msg) => {
       if (msg.t === 'lobby') waiting(msg.players, msg.cap);
-      else if (msg.t === 'go-select') startGame({ kind: 'guest', net });
+      else if (msg.t === 'kicked') {
+        kicked = true;
+        status.textContent = 'The host removed you from the room.';
+      } else if (msg.t === 'go-select') startGame({ kind: 'guest', net, code });
     };
     net.onClose = () => {
-      status.textContent = 'The host closed the room.';
+      if (kicked) return;
+      // Maybe the host is just refreshing — their room code survives that.
+      status.textContent = 'Lost the host — reconnecting…';
+      setTimeout(() => join(10), 2000);
     };
   } catch (err) {
-    status.textContent = describeError(err);
-    setBusy(false);
+    if (retriesLeft > 0) {
+      status.textContent = `Looking for the room… (${retriesLeft} tries left)`;
+      setTimeout(() => join(retriesLeft - 1), 3000);
+    } else {
+      status.textContent = describeError(err);
+      setBusy(false);
+    }
   }
 }
 
-joinBtn.addEventListener('click', join);
+joinBtn.addEventListener('click', () => join());
 codeInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') join();
 });
 
-// Opened via an invite link (?join=CODE) — join the friend's game directly.
-const inviteCode = new URLSearchParams(location.search).get('join');
+const params = new URLSearchParams(location.search);
+const inviteCode = params.get('join');
+const savedRoom = sessionStorage.getItem(ROOM_KEY);
 if (inviteCode) {
+  // Opened via an invite link (?join=CODE). Join directly when reconnecting
+  // (&rejoin=1, set when a game connection drops — keep retrying while the
+  // host's room comes back up) or when this player already has a saved name;
+  // otherwise give them a chance to enter one first.
   codeInput.value = inviteCode;
-  join();
+  if (params.get('rejoin')) {
+    join(10);
+  } else if (localStorage.getItem(NAME_KEY)) {
+    join();
+  } else {
+    status.textContent = 'Enter your name (optional), then press Join.';
+    nameInput.focus();
+  }
+} else if (savedRoom) {
+  // This tab was hosting before a refresh — bring the room back under the
+  // same code so already-shared invite links keep working.
+  try {
+    const room = JSON.parse(savedRoom) as { code: string; cap: number; blockSameIp: boolean; mode: string };
+    capSelect.value = String(room.cap);
+    ipCheck.checked = room.blockSameIp;
+    modeSelect.value = room.mode;
+    openRoom(room.code);
+  } catch {
+    sessionStorage.removeItem(ROOM_KEY);
+  }
 }

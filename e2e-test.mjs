@@ -24,6 +24,15 @@ async function hold(page, key, ms = 150) {
   await page.keyboard.up(key);
 }
 
+// Open an invite link and join, entering a name first when given one.
+// (With a previously saved name the page auto-joins and disables the button.)
+async function joinVia(page, link, name) {
+  await page.goto(link);
+  if (name) await page.fill('#name-input', name);
+  const btn = page.locator('#join-btn');
+  if (await btn.isEnabled().catch(() => false)) await btn.click().catch(() => {});
+}
+
 const host = await newPlayer('host', { width: 1300, height: 760 });
 await host.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(GAME_URL).origin });
 await host.goto(GAME_URL);
@@ -35,11 +44,12 @@ const clipboard = await host.evaluate(() => navigator.clipboard.readText());
 console.log('invite link:', link, '| clipboard matches:', clipboard === link);
 
 const guest1 = await newPlayer('guest1', { width: 1000, height: 700 });
-await guest1.goto(link);
+await joinVia(guest1, link, 'Anne');
 await guest1.waitForFunction(statusIncludes('waiting for the host'), null, { timeout: 30000 });
 console.log('guest1 joined');
 
 // Same browser (= same device ID) trying to join again must be rejected.
+// guest1's saved name makes this tab auto-join on load.
 const dupTab = await guest1.context().newPage();
 await dupTab.goto(link);
 await dupTab.waitForFunction(statusIncludes('already in that game'), null, { timeout: 30000 });
@@ -47,13 +57,13 @@ console.log('duplicate-device join rejected ✓');
 await dupTab.close();
 
 const guest2 = await newPlayer('guest2', { width: 900, height: 600 });
-await guest2.goto(link);
+await joinVia(guest2, link, 'Mary');
 await guest2.waitForFunction(statusIncludes('waiting for the host'), null, { timeout: 30000 });
 console.log('guest2 joined');
 
 // Room is now at its cap of 3 — a fourth player must be turned away.
 const extra = await newPlayer('extra', { width: 800, height: 600 });
-await extra.goto(link);
+await joinVia(extra, link, 'Latecomer');
 await extra.waitForFunction(statusIncludes('full'), null, { timeout: 30000 });
 console.log('over-capacity join rejected ✓');
 await extra.close();
@@ -90,6 +100,7 @@ console.log('elimination round OK');
 // --- scores a point, and the victim reappears.                      ---
 const host2 = await newPlayer('host2', { width: 1300, height: 760 });
 await host2.goto(GAME_URL);
+await host2.fill('#name-input', 'Blackbeard');
 await host2.selectOption('#cap-select', '2');
 await host2.selectOption('#mode-select', 'respawn');
 await host2.click('#host-btn');
@@ -97,10 +108,15 @@ await host2.waitForFunction(statusIncludes('Room code'), null, { timeout: 20000 
 const link2 = await host2.inputValue('#share-link');
 
 const guest3 = await newPlayer('guest3', { width: 1000, height: 700 });
-await guest3.goto(link2);
+await joinVia(guest3, link2, 'Anne');
 await host2.waitForFunction(() => document.getElementById('player-count').textContent.startsWith('2/2'));
 await host2.click('#start-btn');
 for (const p of [host2, guest3]) await p.waitForSelector('#lobby', { state: 'detached', timeout: 15000 });
+
+// Names travel with the join: the host's roster must know the guest as Anne.
+const roster = await host2.evaluate(() => window.__game.roster);
+if (!roster.some((r) => r.label === 'Anne')) throw new Error(`guest name missing from roster: ${JSON.stringify(roster)}`);
+console.log('player names in roster ✓');
 
 await hold(host2, 'Digit1'); // small ships sink fast
 await hold(guest3, 'Digit1');
@@ -163,6 +179,18 @@ await host2.waitForFunction(
 );
 console.log('kick: guest notified, ship sunk, roster updated ✓');
 await guest3.screenshot({ path: 'shot-kicked.png' });
+
+// --- Host refresh: the room must come back under the same code, ---
+// --- so the previously shared invite link still works.          ---
+await host2.reload();
+await host2.waitForFunction(statusIncludes('Room code'), null, { timeout: 60000 });
+const restoredLink = await host2.inputValue('#share-link');
+if (restoredLink !== link2) throw new Error(`room code changed after refresh: ${restoredLink} != ${link2}`);
+
+const guest4 = await newPlayer('guest4', { width: 900, height: 600 });
+await joinVia(guest4, link2, 'Calico Jack');
+await host2.waitForFunction(() => document.getElementById('player-count').textContent.startsWith('2/2'), null, { timeout: 30000 });
+console.log('host refresh resumed the room; old invite link still valid ✓');
 
 await browser.close();
 console.log('done');

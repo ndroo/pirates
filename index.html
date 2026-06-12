@@ -10,6 +10,7 @@
     <div id="lobby">
       <div id="lobby-panel">
         <h1>Pirates: Naval Combat</h1>
+        <input id="name-input" maxlength="14" placeholder="Your name (optional)" autocomplete="off" spellcheck="false" />
         <button id="solo-btn">Single player (vs AI)</button>
         <div class="host-options">
           <label>Max players
@@ -39,6 +40,7 @@
           <p id="player-count"></p>
           <div id="player-list"></div>
           <button id="start-btn" disabled>Start battle</button>
+          <button id="close-room-btn" class="subtle">Close room</button>
         </div>
         <p id="lobby-status"></p>
       </div>

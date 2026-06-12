@@ -9,10 +9,26 @@ over the internet with serverless peer-to-peer multiplayer.
 ## Game modes
 
 - **Single player** — fight the AI captain, as before.
-- **Host a multiplayer game** — pick a player cap (2–16), get a 4-letter room
-  code and invite link, watch players file into the waiting room, then start
-  the battle. Free-for-all: last ship afloat wins.
-- **Join** — open an invite link or enter the room code.
+- **Host a multiplayer game** — pick a player cap (2–16) and a battle mode,
+  get a 4-letter room code and invite link, watch players file into the
+  waiting room, then start the battle. Free-for-all, two rule sets:
+  **Last ship standing** (the sunk spectate until the round ends) or
+  **Respawns** (sunk ships return after 3 s; first to N sinks wins).
+- **Join** — open an invite link or enter the room code, optionally with a
+  display name (shown in the waiting room, HUD, ship tags, and win banner).
+
+The host gets an in-game **⚙ Host panel**: switch rules mid-battle
+(effective immediately for everyone) and kick players — kicked players see a
+notice and their ship sinks in place. The waiting room has kick buttons too.
+
+A host page refresh does **not** kill the room: the room (code + settings) is
+kept in `sessionStorage` and re-registered under the same code on reload,
+while disconnected guests automatically retry joining for ~30 s. The battle
+in progress is lost — everyone lands back at ship select — but the room and
+its invite link survive. Since an invite link only encodes the room code, a
+link stays valid exactly as long as that room exists: refreshes are fine,
+but once the host's tab is closed for good the room is gone and a new
+hosting session mints a new code.
 
 Multiplayer is peer-to-peer over WebRTC (via [PeerJS](https://peerjs.com)) in
 a star topology. There is no game server to run: PeerJS's free public broker
@@ -36,6 +52,11 @@ best-effort (airtight identity would need accounts and a server):
 
 Rooms close to new joins once the battle starts; rematches (press `R`) reuse
 the same roster. A player who disconnects mid-battle sinks where they sailed.
+
+Note on deploys: the two sides of a room must run the same build. If you
+deploy a protocol-changing update while people are mid-game, have everyone
+refresh — a guest on the new build can't complete the handshake with a host
+still running the old one.
 
 ## How to play
 
@@ -116,9 +137,11 @@ npm run build    # type-check and build static files into dist/
 ```
 
 Requires Node 20.19+ or 22.12+ (Vite 8). `e2e-test.mjs` is a Playwright smoke
-test that connects three headless browsers through the real PeerJS broker,
-checks that duplicate-device and over-capacity joins are rejected, and plays
-a few seconds of a 3-way match — run it with `npm run preview` serving
+test that connects headless browsers through the real PeerJS broker and
+exercises the whole multiplayer surface: a 3-way elimination match,
+duplicate-device and over-capacity join rejection, player names, respawn
+mode (a forced sink, score credit, and respawn), mid-game rule changes,
+kicking, and host-refresh room resume. Run it with `npm run preview` serving
 `dist/` on port 4173, then `node e2e-test.mjs`.
 
 ## Deployment

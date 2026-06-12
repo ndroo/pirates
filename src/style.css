@@ -139,6 +139,26 @@ canvas {
   flex: 1;
 }
 
+#name-input {
+  font: inherit;
+  font-size: 16px;
+  text-align: center;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+}
+
+#lobby-panel button.subtle {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  font-size: 14px;
+  padding: 8px;
+}
+
+#lobby-panel button.subtle:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .player-row {
   display: flex;
   align-items: center;

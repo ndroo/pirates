@@ -18,10 +18,16 @@ export interface ShipSnap {
 /** Initial ship placement sent when a battle starts. */
 export interface ShipSpawn {
   id: number;
+  name: string;
   type: ShipTypeName;
   x: number;
   y: number;
   heading: number;
+}
+
+/** Trim and bound a player-supplied name; '' means "use the default label". */
+export function cleanName(raw: unknown): string {
+  return String(raw ?? '').replace(/\s+/g, ' ').trim().slice(0, 14);
 }
 
 export type RejectReason = 'full' | 'duplicate' | 'started' | 'same-ip';
@@ -118,6 +124,7 @@ async function remoteIp(conn: DataConnection): Promise<string | null> {
 interface GuestRecord {
   conn: DataConnection;
   deviceId: string;
+  name: string;
   ip: string | null;
 }
 
@@ -155,6 +162,10 @@ export class HostNet {
     return [...this.guests.keys()];
   }
 
+  guestName(id: number): string {
+    return this.guests.get(id)?.name ?? '';
+  }
+
   /** Stop admitting new players (the battle is starting). */
   markStarted() {
     this.started = true;
@@ -175,7 +186,8 @@ export class HostNet {
   }
 
   private async vetAndAccept(conn: DataConnection) {
-    const dev = (conn.metadata as { deviceId?: string } | undefined)?.deviceId;
+    const meta = conn.metadata as { deviceId?: string; name?: string } | undefined;
+    const dev = meta?.deviceId;
     let ip: string | null = null;
 
     let reason: RejectReason | null = null;
@@ -195,7 +207,7 @@ export class HostNet {
     }
 
     const id = this.nextId++;
-    this.guests.set(id, { conn, deviceId: dev!, ip });
+    this.guests.set(id, { conn, deviceId: dev!, name: cleanName(meta?.name), ip });
     conn.on('data', (data) => this.onMessage(id, data as NetMessage));
     conn.on('close', () => {
       if (!this.guests.delete(id)) return;
@@ -238,10 +250,14 @@ export class GuestNet {
   }
 }
 
-/** Create a room. Resolves once the room is registered with the broker. */
-export function hostGame(opts: { cap: number; blockSameIp: boolean }): Promise<HostNet> {
+/**
+ * Create a room. Resolves once the room is registered with the broker.
+ * Pass `code` to re-register a room after a host page refresh — guests
+ * holding the old invite link can then find it again.
+ */
+export function hostGame(opts: { cap: number; blockSameIp: boolean; code?: string }): Promise<HostNet> {
   return new Promise((resolve, reject) => {
-    const code = randomCode();
+    const code = opts.code ?? randomCode();
     const peer = new Peer(ID_PREFIX + code);
     peer.on('error', (err) => reject(err));
     peer.on('open', () => resolve(new HostNet(peer, code, opts.cap, opts.blockSameIp)));
@@ -249,7 +265,7 @@ export function hostGame(opts: { cap: number; blockSameIp: boolean }): Promise<H
 }
 
 /** Join a room by code. Resolves once the host accepts us. */
-export function joinGame(code: string): Promise<{ net: GuestNet; players: number; cap: number }> {
+export function joinGame(code: string, name: string): Promise<{ net: GuestNet; players: number; cap: number }> {
   return new Promise((resolve, reject) => {
     const peer = new Peer();
     const timer = setTimeout(() => reject(new Error('No response from the host.')), 15000);
@@ -261,7 +277,7 @@ export function joinGame(code: string): Promise<{ net: GuestNet; players: number
     peer.on('open', () => {
       const conn = peer.connect(ID_PREFIX + code.toUpperCase(), {
         reliable: true,
-        metadata: { deviceId: deviceId() },
+        metadata: { deviceId: deviceId(), name: cleanName(name) },
       });
       const net = new GuestNet(peer, conn);
       net.onMessage = (msg) => {

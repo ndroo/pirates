@@ -11,6 +11,15 @@
       <div id="lobby-panel">
         <h1>Pirates: Naval Combat</h1>
         <button id="solo-btn">Single player (vs AI)</button>
+        <div class="host-options">
+          <label>Max players
+            <select id="cap-select"></select>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="ip-check" />
+            Block same-network joins
+          </label>
+        </div>
         <button id="host-btn">Host a multiplayer game</button>
         <div class="join-row">
           <input id="code-input" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
@@ -19,6 +28,10 @@
         <div class="join-row" id="share-row" hidden>
           <input id="share-link" readonly />
           <button id="copy-btn">Copy</button>
+        </div>
+        <div id="wait-room" hidden>
+          <p id="player-list"></p>
+          <button id="start-btn" disabled>Start battle</button>
         </div>
         <p id="lobby-status"></p>
       </div>

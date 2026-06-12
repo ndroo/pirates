@@ -1,36 +1,21 @@
-// Smoke test: two browsers play a multiplayer match via the real PeerJS broker.
+// Smoke test: a 3-player match via the real PeerJS broker, plus rejection of
+// duplicate-device and over-capacity joins.
 import { chromium } from 'playwright';
 
 const GAME_URL = process.env.GAME_URL || 'http://localhost:4173/';
 
 const browser = await chromium.launch();
-const context = await browser.newContext();
-await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(GAME_URL).origin });
-const host = await context.newPage();
-await host.setViewportSize({ width: 1300, height: 760 });
-const guest = await context.newPage();
-await guest.setViewportSize({ width: 900, height: 600 });
 
-host.on('console', (m) => console.log('[host]', m.text()));
-guest.on('console', (m) => console.log('[guest]', m.text()));
-host.on('pageerror', (e) => console.log('[host:ERR]', e.message));
-guest.on('pageerror', (e) => console.log('[guest:ERR]', e.message));
+// Each player gets their own browser context = their own localStorage device ID.
+async function newPlayer(name, viewport) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.setViewportSize(viewport);
+  page.on('pageerror', (e) => console.log(`[${name}:ERR]`, e.message));
+  return page;
+}
 
-await host.goto(GAME_URL);
-
-await host.click('#host-btn');
-await host.waitForFunction(() => document.getElementById('lobby-status').textContent.includes('Room code'), null, { timeout: 20000 });
-const link = await host.inputValue('#share-link');
-const clipboard = await host.evaluate(() => navigator.clipboard.readText());
-console.log('invite link:', link, '| clipboard matches:', clipboard === link);
-
-// Guest joins via the invite link — no code entry needed.
-await guest.goto(link);
-
-// Lobby is removed only once the P2P data channel opens on each side.
-await host.waitForSelector('#lobby', { state: 'detached', timeout: 30000 });
-await guest.waitForSelector('#lobby', { state: 'detached', timeout: 30000 });
-console.log('P2P connected: both lobbies closed');
+const statusIncludes = (text) => `document.getElementById('lobby-status').textContent.includes(${JSON.stringify(text)})`;
 
 // Hold keys ~150ms: the game polls key state once per animation frame.
 async function hold(page, key, ms = 150) {
@@ -39,21 +24,65 @@ async function hold(page, key, ms = 150) {
   await page.keyboard.up(key);
 }
 
-// Host picks before guest — exercises the "waiting for friend" path.
+const host = await newPlayer('host', { width: 1300, height: 760 });
+await host.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(GAME_URL).origin });
+await host.goto(GAME_URL);
+await host.selectOption('#cap-select', '3');
+await host.click('#host-btn');
+await host.waitForFunction(statusIncludes('Room code'), null, { timeout: 20000 });
+const link = await host.inputValue('#share-link');
+const clipboard = await host.evaluate(() => navigator.clipboard.readText());
+console.log('invite link:', link, '| clipboard matches:', clipboard === link);
+
+const guest1 = await newPlayer('guest1', { width: 1000, height: 700 });
+await guest1.goto(link);
+await guest1.waitForFunction(statusIncludes('waiting for the host'), null, { timeout: 30000 });
+console.log('guest1 joined');
+
+// Same browser (= same device ID) trying to join again must be rejected.
+const dupTab = await guest1.context().newPage();
+await dupTab.goto(link);
+await dupTab.waitForFunction(statusIncludes('already in that game'), null, { timeout: 30000 });
+console.log('duplicate-device join rejected ✓');
+await dupTab.close();
+
+const guest2 = await newPlayer('guest2', { width: 900, height: 600 });
+await guest2.goto(link);
+await guest2.waitForFunction(statusIncludes('waiting for the host'), null, { timeout: 30000 });
+console.log('guest2 joined');
+
+// Room is now at its cap of 3 — a fourth player must be turned away.
+const extra = await newPlayer('extra', { width: 800, height: 600 });
+await extra.goto(link);
+await extra.waitForFunction(statusIncludes('full'), null, { timeout: 30000 });
+console.log('over-capacity join rejected ✓');
+await extra.close();
+
+await host.waitForFunction(() => document.getElementById('player-list').textContent.startsWith('3/3'));
+await host.click('#start-btn');
+
+// Everyone lands on ship select once the host starts.
+for (const p of [host, guest1, guest2]) {
+  await p.waitForSelector('#lobby', { state: 'detached', timeout: 15000 });
+}
+console.log('all 3 players in ship select');
+
 await hold(host, 'Digit3');
-await host.waitForTimeout(700);
-await host.screenshot({ path: 'shot-host-waiting.png' });
+await hold(guest1, 'Digit1');
+await host.waitForTimeout(500);
+await host.screenshot({ path: 'shot-select-waiting.png' }); // 2/3 ready
+await hold(guest2, 'Digit2');
+await host.waitForTimeout(1000);
 
-await hold(guest, 'Digit1');
-await guest.waitForTimeout(1000);
-
-// Guest sails and fires; host turns the other way.
-await guest.keyboard.down('ArrowLeft');
-await guest.keyboard.down('Space');
-await host.keyboard.down('ArrowRight');
+// Everyone sails and the guests open fire.
+await guest1.keyboard.down('ArrowLeft');
+await guest1.keyboard.down('Space');
+await guest2.keyboard.down('ArrowRight');
+await guest2.keyboard.down('Space');
+await host.keyboard.down('ArrowLeft');
 await host.waitForTimeout(2500);
 await host.screenshot({ path: 'shot-host-battle.png' });
-await guest.screenshot({ path: 'shot-guest-battle.png' });
+await guest2.screenshot({ path: 'shot-guest-battle.png' });
 
 await browser.close();
 console.log('done');

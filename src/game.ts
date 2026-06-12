@@ -2,25 +2,28 @@ import { decideTurn, wantsToFire } from './ai';
 import { Cannonball, drawCannonball } from './cannonball';
 import { Explosion } from './explosion';
 import type { Input } from './input';
-import type { Net, NetMessage, ShipSnap } from './net';
+import type { GuestNet, HostNet, NetMessage, ShipSnap } from './net';
 import { Ship, SHIP_TYPES, type ShipTypeName, type Turn } from './ship';
 
-// Fixed logical arena so both players see the same battlefield; the canvas is
+// Fixed logical arena so all players see the same battlefield; the canvas is
 // scaled to fit each window.
 export const WORLD_W = 1280;
 export const WORLD_H = 720;
 
 const MAX_DT = 0.05; // s; clamp so tab-switch pauses don't teleport ships
 const PLAYER_RELOAD = 1.4; // s between broadsides
-const ENEMY_RELOAD = 2.2; // AI only; humans both get PLAYER_RELOAD
+const AI_RELOAD = 2.2; // the AI aims perfectly, so it reloads slower
 
-const HOST_COLOR = '#8b5a2b';
-const GUEST_COLOR = '#7a1f1f';
+// One distinct hull color per player slot (host is 0).
+export const PLAYER_COLORS = [
+  '#8b5a2b', '#7a1f1f', '#1f5c7a', '#3f7a26', '#6b3fa0', '#a07a1f', '#a0421f', '#3fa08c',
+  '#535ec8', '#b3477e', '#5a7a1f', '#1f7a5c', '#8c5ab0', '#b08c2a', '#6e6e6e', '#274fa0',
+];
 
 export type GameMode =
   | { kind: 'solo' }
-  | { kind: 'host'; net: Net }
-  | { kind: 'guest'; net: Net };
+  | { kind: 'host'; net: HostNet }
+  | { kind: 'guest'; net: GuestNet };
 
 const SELECT_KEYS: Record<string, ShipTypeName> = {
   Digit1: 'small',
@@ -40,40 +43,63 @@ interface Wave {
   r: number;
 }
 
+/** One player (or the solo AI) in the match. */
+interface Slot {
+  id: number; // 0 = host; shown as "Player <id + 1>"
+  color: string;
+  ai: boolean;
+  pick: ShipTypeName | null;
+  ship: Ship | null;
+  input: { turn: Turn; fire: boolean; restart: boolean }; // latest remote keys
+}
+
+function newSlot(id: number, ai = false): Slot {
+  return {
+    id,
+    color: PLAYER_COLORS[id % PLAYER_COLORS.length],
+    ai,
+    pick: null,
+    ship: null,
+    input: { turn: 0, fire: false, restart: false },
+  };
+}
+
 export class Game {
   private ctx: CanvasRenderingContext2D;
   private input: Input;
   private mode: GameMode;
-  private net: Net | null = null;
 
   private phase: 'select' | 'battle' = 'select';
-  private mine!: Ship; // this player's ship (the AI's in solo is `theirs`)
-  private theirs!: Ship;
+  private slots: Slot[] = [];
+  private selfId: number;
+  private myPick: ShipTypeName | null = null;
   private cannonballs: Cannonball[] = [];
   private explosions: Explosion[] = [];
   private waves: Wave[] = [];
   private lastTime = 0;
 
   // Multiplayer state.
-  private myPick: ShipTypeName | null = null;
-  private theirPick: ShipTypeName | null = null;
-  private remoteInput = { turn: 0 as Turn, fire: false, restart: false }; // host: guest's keys
   private remoteBalls: { x: number; y: number }[] = []; // guest: balls from snapshots
   private pendingBoom: { x: number; y: number }[] = []; // host: explosions to send
+  private readyInfo: { ready: number; total: number } | null = null; // guest: select progress
   private disconnected = false;
 
   constructor(ctx: CanvasRenderingContext2D, input: Input, mode: GameMode = { kind: 'solo' }) {
     this.ctx = ctx;
     this.input = input;
     this.mode = mode;
+    this.selfId = mode.kind === 'guest' ? mode.net.selfId : 0;
 
-    if (mode.kind !== 'solo') {
-      this.net = mode.net;
-      this.net.onMessage = (msg) => this.handleMessage(msg);
-      this.net.onClose = () => {
+    if (mode.kind === 'host') {
+      mode.net.onMessage = (id, msg) => this.handleGuestMessage(id, msg);
+      mode.net.onGuestLeave = (id) => this.dropPlayer(id);
+    } else if (mode.kind === 'guest') {
+      mode.net.onMessage = (msg) => this.handleHostMessage(msg);
+      mode.net.onClose = () => {
         this.disconnected = true;
       };
     }
+    this.buildSlots();
 
     for (let i = 0; i < 40; i++) {
       this.waves.push({
@@ -84,40 +110,75 @@ export class Game {
     }
   }
 
-  private handleMessage(msg: NetMessage) {
+  /** Roster for the next battle. Guests get theirs from the start message. */
+  private buildSlots() {
+    if (this.mode.kind === 'solo') {
+      this.slots = [newSlot(0), newSlot(1, true)];
+    } else if (this.mode.kind === 'host') {
+      this.slots = [newSlot(0), ...this.mode.net.guestIds.map((id) => newSlot(id))];
+    } else {
+      this.slots = [];
+    }
+  }
+
+  private get selfSlot(): Slot | undefined {
+    return this.slots.find((s) => s.id === this.selfId);
+  }
+
+  private get aliveSlots(): Slot[] {
+    return this.slots.filter((s) => s.ship?.alive);
+  }
+
+  private get over(): boolean {
+    return this.phase === 'battle' && this.aliveSlots.length <= 1;
+  }
+
+  // --- messages ---
+
+  private handleGuestMessage(id: number, msg: NetMessage) {
+    const slot = this.slots.find((s) => s.id === id);
+    if (!slot) return;
+    if (msg.t === 'pick' && this.phase === 'select' && !slot.pick) {
+      slot.pick = msg.ship;
+      this.broadcastPicked();
+      this.maybeStartBattle();
+    } else if (msg.t === 'input') {
+      slot.input = { turn: msg.turn, fire: msg.fire, restart: msg.restart };
+    }
+  }
+
+  private handleHostMessage(msg: NetMessage) {
     switch (msg.t) {
-      case 'pick':
-        this.theirPick = msg.ship;
-        if (this.mode.kind === 'host') this.tryStartHostBattle();
-        break;
-      case 'input': // guest keys, applied by the host each frame
-        this.remoteInput = { turn: msg.turn, fire: msg.fire, restart: msg.restart };
-        break;
-      case 'start': // host picked positions/types; guest mirrors them
-        if (this.mode.kind === 'guest') {
-          this.theirs = new Ship(WORLD_W * 0.3, WORLD_H * 0.6, -Math.PI / 4, HOST_COLOR, msg.hostType);
-          this.mine = new Ship(WORLD_W * 0.7, WORLD_H * 0.3, Math.PI * 0.75, GUEST_COLOR, msg.guestType);
-          this.cannonballs = [];
-          this.remoteBalls = [];
-          this.explosions = [];
-          this.phase = 'battle';
-        }
-        break;
-      case 'phase':
+      case 'go-select':
         this.resetToSelect();
         break;
+      case 'picked':
+        this.readyInfo = { ready: msg.ready, total: msg.total };
+        break;
+      case 'start':
+        this.slots = msg.ships.map((sp) => {
+          const slot = newSlot(sp.id);
+          slot.pick = sp.type;
+          slot.ship = new Ship(sp.x, sp.y, sp.heading, slot.color, sp.type);
+          return slot;
+        });
+        this.cannonballs = [];
+        this.remoteBalls = [];
+        this.explosions = [];
+        this.phase = 'battle';
+        break;
       case 'state':
-        if (this.mode.kind === 'guest' && this.phase === 'battle') {
-          this.applySnap(this.theirs, msg.ships[0]);
-          this.applySnap(this.mine, msg.ships[1]);
-          this.remoteBalls = msg.balls;
-          for (const b of msg.boom) this.explosions.push(new Explosion(b.x, b.y));
-        }
+        if (this.phase !== 'battle') break;
+        for (const snap of msg.ships) this.applySnap(snap);
+        this.remoteBalls = msg.balls;
+        for (const b of msg.boom) this.explosions.push(new Explosion(b.x, b.y));
         break;
     }
   }
 
-  private applySnap(ship: Ship, snap: ShipSnap) {
+  private applySnap(snap: ShipSnap) {
+    const ship = this.slots.find((s) => s.id === snap.id)?.ship;
+    if (!ship) return;
     ship.x = snap.x;
     ship.y = snap.y;
     ship.heading = snap.heading;
@@ -125,39 +186,94 @@ export class Game {
     ship.sinkProgress = snap.sink;
   }
 
-  private snapOf(ship: Ship): ShipSnap {
-    return { x: ship.x, y: ship.y, heading: ship.heading, health: ship.health, sink: ship.sinkProgress };
+  /** Host: a guest's connection dropped. */
+  private dropPlayer(id: number) {
+    const slot = this.slots.find((s) => s.id === id);
+    if (!slot) return;
+    if (this.phase === 'select') {
+      this.slots = this.slots.filter((s) => s !== slot);
+      this.broadcastPicked();
+      this.maybeStartBattle();
+    } else if (slot.ship) {
+      slot.ship.health = 0; // their ship sinks where it sailed
+    }
   }
 
   private resetToSelect() {
     this.phase = 'select';
     this.myPick = null;
-    this.theirPick = null;
-    this.remoteInput = { turn: 0, fire: false, restart: false };
+    this.readyInfo = null;
     this.cannonballs = [];
     this.remoteBalls = [];
     this.explosions = [];
     this.pendingBoom = [];
+    this.buildSlots();
+    if (this.mode.kind === 'host') {
+      this.mode.net.broadcast({ t: 'go-select' });
+      this.broadcastPicked();
+    }
   }
 
-  private startBattle(mineType: ShipTypeName, theirType: ShipTypeName) {
-    this.mine = new Ship(WORLD_W * 0.3, WORLD_H * 0.6, -Math.PI / 4, HOST_COLOR, mineType);
-    this.theirs = new Ship(WORLD_W * 0.7, WORLD_H * 0.3, Math.PI * 0.75, GUEST_COLOR, theirType);
+  private broadcastPicked() {
+    if (this.mode.kind !== 'host' || this.phase !== 'select') return;
+    const ready = this.slots.filter((s) => s.pick).length;
+    this.mode.net.broadcast({ t: 'picked', ready, total: this.slots.length });
+  }
+
+  // --- battle setup ---
+
+  /** Host/solo: once everyone has picked, spawn the fleet in a ring and go. */
+  private maybeStartBattle() {
+    if (this.phase !== 'select' || this.slots.some((s) => !s.pick)) return;
+
+    const n = this.slots.length;
+    const rx = WORLD_W * 0.32;
+    const ry = WORLD_H * 0.32;
+    this.slots.forEach((slot, i) => {
+      const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
+      slot.ship = new Ship(
+        WORLD_W / 2 + Math.cos(angle) * rx,
+        WORLD_H / 2 + Math.sin(angle) * ry,
+        angle + Math.PI / 2, // tangent to the ring, so the fleet starts circling
+        slot.color,
+        slot.pick!,
+      );
+    });
     this.cannonballs = [];
     this.explosions = [];
     this.pendingBoom = [];
     this.phase = 'battle';
+
+    if (this.mode.kind === 'host') {
+      this.mode.net.broadcast({
+        t: 'start',
+        ships: this.slots.map((s) => ({
+          id: s.id,
+          type: s.pick!,
+          x: s.ship!.x,
+          y: s.ship!.y,
+          heading: s.ship!.heading,
+        })),
+      });
+    }
   }
 
-  private tryStartHostBattle() {
-    if (!this.myPick || !this.theirPick) return;
-    this.startBattle(this.myPick, this.theirPick);
-    this.net!.send({ t: 'start', hostType: this.myPick, guestType: this.theirPick });
+  private nearestEnemy(ship: Ship): Ship | null {
+    let best: Ship | null = null;
+    let bestDist = Infinity;
+    for (const slot of this.slots) {
+      const other = slot.ship;
+      if (!other || other === ship || !other.alive) continue;
+      const d = Math.hypot(other.x - ship.x, other.y - ship.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = other;
+      }
+    }
+    return best;
   }
 
-  private get over(): boolean {
-    return !this.mine.alive || !this.theirs.alive;
-  }
+  // --- game loop ---
 
   start() {
     this.lastTime = performance.now();
@@ -184,7 +300,7 @@ export class Game {
     if (this.input.isDown('ArrowRight') || this.input.isDown('KeyD')) turn = 1;
 
     if (this.mode.kind === 'guest') {
-      this.net!.send({
+      this.mode.net.send({
         t: 'input',
         turn,
         fire: this.input.isDown('Space'),
@@ -196,43 +312,50 @@ export class Game {
       return;
     }
 
-    if (this.over && (this.input.isDown('KeyR') || this.remoteInput.restart)) {
+    if (this.over && (this.input.isDown('KeyR') || this.slots.some((s) => s.input.restart))) {
       this.resetToSelect();
-      this.net?.send({ t: 'phase', phase: 'select' });
       return;
     }
 
-    const theirTurn: Turn =
-      this.mode.kind === 'host'
-        ? this.remoteInput.turn
-        : this.over
-          ? 0
-          : decideTurn(this.theirs, this.mine);
+    for (const slot of this.slots) {
+      const ship = slot.ship;
+      if (!ship) continue;
 
-    this.mine.update(dt, turn, WORLD_W, WORLD_H);
-    this.theirs.update(dt, theirTurn, WORLD_W, WORLD_H);
-
-    if (!this.over) {
-      if (this.input.isDown('Space') && this.mine.reload <= 0) {
-        this.fireBroadside(this.mine, this.theirs, PLAYER_RELOAD);
+      let shipTurn: Turn = 0;
+      let fire = false;
+      if (slot.id === this.selfId) {
+        shipTurn = turn;
+        fire = this.input.isDown('Space');
+      } else if (slot.ai) {
+        const target = this.nearestEnemy(ship);
+        shipTurn = !this.over && target ? decideTurn(ship, target) : 0;
+        fire = !this.over && target ? wantsToFire(ship, target) : false;
+      } else {
+        shipTurn = slot.input.turn;
+        fire = slot.input.fire;
       }
-      const theirsFires =
-        this.mode.kind === 'host'
-          ? this.remoteInput.fire
-          : wantsToFire(this.theirs, this.mine);
-      if (theirsFires && this.theirs.reload <= 0) {
-        this.fireBroadside(this.theirs, this.mine, this.mode.kind === 'host' ? PLAYER_RELOAD : ENEMY_RELOAD);
+
+      ship.update(dt, shipTurn, WORLD_W, WORLD_H);
+
+      if (!this.over && fire && ship.alive && ship.reload <= 0) {
+        const target = this.nearestEnemy(ship);
+        if (target) this.fireBroadside(ship, target, slot.ai ? AI_RELOAD : PLAYER_RELOAD);
       }
     }
 
     for (const ball of this.cannonballs) {
       ball.update(dt);
-      const target = ball.owner === this.mine ? this.theirs : this.mine;
-      if (!ball.spent && target.alive && target.containsPoint(ball.x, ball.y)) {
-        ball.spent = true;
-        target.takeHit();
-        this.explosions.push(new Explosion(ball.x, ball.y));
-        this.pendingBoom.push({ x: ball.x, y: ball.y });
+      if (ball.spent) continue;
+      for (const slot of this.slots) {
+        const target = slot.ship;
+        if (!target || target === ball.owner || !target.alive) continue;
+        if (target.containsPoint(ball.x, ball.y)) {
+          ball.spent = true;
+          target.takeHit();
+          this.explosions.push(new Explosion(ball.x, ball.y));
+          this.pendingBoom.push({ x: ball.x, y: ball.y });
+          break;
+        }
       }
     }
     this.cannonballs = this.cannonballs.filter((b) => !b.spent);
@@ -241,9 +364,16 @@ export class Game {
     this.explosions = this.explosions.filter((ex) => !ex.done);
 
     if (this.mode.kind === 'host') {
-      this.net!.send({
+      this.mode.net.broadcast({
         t: 'state',
-        ships: [this.snapOf(this.mine), this.snapOf(this.theirs)],
+        ships: this.slots.filter((s) => s.ship).map((s) => ({
+          id: s.id,
+          x: s.ship!.x,
+          y: s.ship!.y,
+          heading: s.ship!.heading,
+          health: s.ship!.health,
+          sink: s.ship!.sinkProgress,
+        })),
         balls: this.cannonballs.map((b) => ({ x: b.x, y: b.y })),
         boom: this.pendingBoom,
       });
@@ -255,13 +385,18 @@ export class Game {
     if (this.myPick) return;
     for (const [code, type] of Object.entries(SELECT_KEYS)) {
       if (!this.input.isDown(code)) continue;
-      if (this.mode.kind === 'solo') {
-        const types = Object.keys(SHIP_TYPES) as ShipTypeName[];
-        this.startBattle(type, types[Math.floor(Math.random() * types.length)]);
+      this.myPick = type;
+      if (this.mode.kind === 'guest') {
+        this.mode.net.send({ t: 'pick', ship: type });
       } else {
-        this.myPick = type;
-        this.net!.send({ t: 'pick', ship: type });
-        if (this.mode.kind === 'host') this.tryStartHostBattle();
+        const self = this.selfSlot;
+        if (self) self.pick = type;
+        if (this.mode.kind === 'solo') {
+          const types = Object.keys(SHIP_TYPES) as ShipTypeName[];
+          this.slots.find((s) => s.ai)!.pick = types[Math.floor(Math.random() * types.length)];
+        }
+        this.broadcastPicked();
+        this.maybeStartBattle();
       }
       break;
     }
@@ -292,6 +427,8 @@ export class Game {
     shooter.reload = reload;
   }
 
+  // --- rendering ---
+
   private render() {
     this.drawSea();
     if (this.phase === 'select') {
@@ -303,18 +440,36 @@ export class Game {
       } else {
         for (const ball of this.cannonballs) ball.draw(ctx);
       }
-      this.mine.draw(ctx);
-      this.theirs.draw(ctx);
+      for (const slot of this.slots) slot.ship?.draw(ctx);
+      for (const slot of this.slots) this.drawShipTag(slot);
       for (const ex of this.explosions) ex.draw(ctx);
 
-      const theirLabel = this.mode.kind === 'solo' ? 'Enemy' : 'Friend';
-      this.drawHealthRow(`You (${this.mine.type})`, this.mine, 0);
-      this.drawHealthRow(`${theirLabel} (${this.theirs.type})`, this.theirs, 1);
+      this.slots.forEach((slot, row) => {
+        if (slot.ship) this.drawHealthRow(slot, row);
+      });
 
       if (this.over) this.drawGameOver();
     }
 
     if (this.disconnected) this.drawDisconnected();
+  }
+
+  private slotLabel(slot: Slot): string {
+    if (slot.id === this.selfId) return 'You';
+    if (slot.ai) return 'Enemy';
+    return `Player ${slot.id + 1}`;
+  }
+
+  /** Small name tag above each afloat ship so players can find themselves. */
+  private drawShipTag(slot: Slot) {
+    const ship = slot.ship;
+    if (!ship || !ship.alive || this.slots.length <= 2) return;
+    const ctx = this.ctx;
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = slot.id === this.selfId ? '#fff' : 'rgba(255, 255, 255, 0.65)';
+    ctx.fillText(slot.id === this.selfId ? 'You' : `P${slot.id + 1}`, ship.x, ship.y - ship.length / 2 - 8);
   }
 
   private drawSea() {
@@ -345,7 +500,7 @@ export class Game {
     ctx.font = '22px system-ui, sans-serif';
     ctx.fillText('Choose your ship', w / 2, h * 0.18 + 44);
 
-    const color = this.mode.kind === 'guest' ? GUEST_COLOR : HOST_COLOR;
+    const color = PLAYER_COLORS[this.selfId % PLAYER_COLORS.length];
     const types = Object.keys(SHIP_TYPES) as ShipTypeName[];
     types.forEach((type, i) => {
       const stats = SHIP_TYPES[type];
@@ -367,20 +522,28 @@ export class Game {
     ctx.font = '17px system-ui, sans-serif';
     if (this.mode.kind === 'solo') {
       ctx.fillText('Press 1, 2 or 3 to set sail — the enemy ship is chosen at random', w / 2, h * 0.82);
-    } else if (this.myPick) {
-      ctx.fillText(`You chose the ${this.myPick} ship — waiting for your friend…`, w / 2, h * 0.82);
-    } else {
-      ctx.fillText('Press 1, 2 or 3 to choose your ship', w / 2, h * 0.82);
-      ctx.fillText(
-        this.theirPick ? 'Your friend is ready!' : 'Your friend is still choosing…',
-        w / 2,
-        h * 0.82 + 28,
-      );
+      return;
+    }
+
+    ctx.fillText(
+      this.myPick
+        ? `You chose the ${this.myPick} ship — waiting for the other captains…`
+        : 'Press 1, 2 or 3 to choose your ship',
+      w / 2,
+      h * 0.82,
+    );
+    const ready =
+      this.mode.kind === 'host'
+        ? { ready: this.slots.filter((s) => s.pick).length, total: this.slots.length }
+        : this.readyInfo;
+    if (ready) {
+      ctx.fillText(`${ready.ready}/${ready.total} captains ready`, w / 2, h * 0.82 + 28);
     }
   }
 
-  private drawHealthRow(label: string, ship: Ship, row: number) {
+  private drawHealthRow(slot: Slot, row: number) {
     const ctx = this.ctx;
+    const ship = slot.ship!;
     const segW = 14;
     const segH = 10;
     const gap = 3;
@@ -390,11 +553,14 @@ export class Game {
     const totalW = ship.maxHealth * (segW + gap) - gap;
     const x0 = WORLD_W - margin - totalW;
 
+    ctx.fillStyle = slot.color;
+    ctx.fillRect(x0 - 18, y, segH, segH);
+
     ctx.font = '13px system-ui, sans-serif';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff';
-    ctx.fillText(label, x0 - 10, y + segH / 2);
+    ctx.fillText(`${this.slotLabel(slot)} (${ship.type})`, x0 - 26, y + segH / 2);
 
     for (let i = 0; i < ship.maxHealth; i++) {
       ctx.fillStyle = i < ship.health ? '#4caf50' : 'rgba(255, 255, 255, 0.25)';
@@ -414,15 +580,18 @@ export class Game {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 42px system-ui, sans-serif';
-    const won = this.mine.alive;
-    const title =
-      this.mode.kind === 'solo'
-        ? won
-          ? 'Enemy ship destroyed!'
-          : 'Your ship was destroyed!'
-        : won
-          ? 'Victory! You sank your friend!'
-          : 'Your ship was destroyed!';
+
+    const winner = this.aliveSlots[0];
+    let title: string;
+    if (this.mode.kind === 'solo') {
+      title = winner?.id === this.selfId ? 'Enemy ship destroyed!' : 'Your ship was destroyed!';
+    } else if (!winner) {
+      title = 'All ships sank!';
+    } else if (winner.id === this.selfId) {
+      title = 'Victory! Last ship afloat!';
+    } else {
+      title = `${this.slotLabel(winner)} wins!`;
+    }
     ctx.fillText(title, w / 2, h / 2 - 20);
     ctx.font = '20px system-ui, sans-serif';
     ctx.fillText(this.mode.kind === 'solo' ? 'Press R for a new battle' : 'Press R for a rematch', w / 2, h / 2 + 24);

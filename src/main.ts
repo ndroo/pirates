@@ -6,7 +6,7 @@ import './style.css';
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
 
-// Fixed logical resolution, scaled to fit the window, so both players see the
+// Fixed logical resolution, scaled to fit the window, so all players see the
 // same arena no matter their screen size.
 canvas.width = WORLD_W;
 canvas.height = WORLD_H;
@@ -25,15 +25,31 @@ const soloBtn = document.getElementById('solo-btn') as HTMLButtonElement;
 const hostBtn = document.getElementById('host-btn') as HTMLButtonElement;
 const joinBtn = document.getElementById('join-btn') as HTMLButtonElement;
 const codeInput = document.getElementById('code-input') as HTMLInputElement;
+const capSelect = document.getElementById('cap-select') as HTMLSelectElement;
+const ipCheck = document.getElementById('ip-check') as HTMLInputElement;
 const shareRow = document.getElementById('share-row') as HTMLDivElement;
 const shareLink = document.getElementById('share-link') as HTMLInputElement;
 const copyBtn = document.getElementById('copy-btn') as HTMLButtonElement;
+const waitRoom = document.getElementById('wait-room') as HTMLDivElement;
+const playerList = document.getElementById('player-list') as HTMLParagraphElement;
+const startBtn = document.getElementById('start-btn') as HTMLButtonElement;
+
+// 2–16 players; beyond that a browser host's WebRTC connections get shaky.
+for (let n = 2; n <= 16; n++) {
+  const opt = document.createElement('option');
+  opt.value = String(n);
+  opt.textContent = String(n);
+  if (n === 5) opt.selected = true;
+  capSelect.append(opt);
+}
 
 function setBusy(busy: boolean) {
   soloBtn.disabled = busy;
   hostBtn.disabled = busy;
   joinBtn.disabled = busy;
   codeInput.disabled = busy;
+  capSelect.disabled = busy;
+  ipCheck.disabled = busy;
 }
 
 function startGame(mode: GameMode) {
@@ -45,10 +61,8 @@ function describeError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes('Could not connect to peer')) return 'No game found with that code.';
   if (msg.includes('is taken')) return 'Room code collision — please try hosting again.';
-  return `Connection failed: ${msg}`;
+  return msg.endsWith('.') ? msg : `Connection failed: ${msg}`;
 }
-
-soloBtn.addEventListener('click', () => startGame({ kind: 'solo' }));
 
 async function copyShareLink() {
   try {
@@ -63,17 +77,32 @@ async function copyShareLink() {
 }
 copyBtn.addEventListener('click', copyShareLink);
 
+soloBtn.addEventListener('click', () => startGame({ kind: 'solo' }));
+
 hostBtn.addEventListener('click', async () => {
   setBusy(true);
   status.textContent = 'Creating room…';
   try {
-    const net = await hostGame((code) => {
-      shareLink.value = `${location.origin}${location.pathname}?join=${code}`;
-      shareRow.hidden = false;
-      status.textContent = `Room code: ${code} — send your friend the invite link and wait here.`;
-      copyShareLink();
+    const net = await hostGame({ cap: Number(capSelect.value), blockSameIp: ipCheck.checked });
+
+    shareLink.value = `${location.origin}${location.pathname}?join=${net.code}`;
+    shareRow.hidden = false;
+    waitRoom.hidden = false;
+    status.textContent = `Room code: ${net.code} — send your friends the invite link.`;
+    copyShareLink();
+
+    const updateRoom = (players: number) => {
+      playerList.textContent = `${players}/${net.cap} players aboard`;
+      startBtn.disabled = players < 2;
+    };
+    updateRoom(net.playerCount);
+    net.onLobbyChange = updateRoom;
+
+    startBtn.addEventListener('click', () => {
+      net.markStarted();
+      net.broadcast({ t: 'go-select' });
+      startGame({ kind: 'host', net });
     });
-    startGame({ kind: 'host', net });
   } catch (err) {
     status.textContent = describeError(err);
     setBusy(false);
@@ -89,7 +118,17 @@ async function join() {
   setBusy(true);
   status.textContent = 'Connecting…';
   try {
-    startGame({ kind: 'guest', net: await joinGame(code) });
+    const { net, players, cap } = await joinGame(code);
+    const waiting = (n: number, c: number) =>
+      (status.textContent = `Joined! ${n}/${c} players aboard — waiting for the host to start…`);
+    waiting(players, cap);
+    net.onMessage = (msg) => {
+      if (msg.t === 'lobby') waiting(msg.players, msg.cap);
+      else if (msg.t === 'go-select') startGame({ kind: 'guest', net });
+    };
+    net.onClose = () => {
+      status.textContent = 'The host closed the room.';
+    };
   } catch (err) {
     status.textContent = describeError(err);
     setBusy(false);

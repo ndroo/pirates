@@ -9,16 +9,33 @@ over the internet with serverless peer-to-peer multiplayer.
 ## Game modes
 
 - **Single player** — fight the AI captain, as before.
-- **Host a multiplayer game** — you get a 4-letter room code to share.
-- **Join** — enter a friend's room code to connect to their game.
+- **Host a multiplayer game** — pick a player cap (2–16), get a 4-letter room
+  code and invite link, watch players file into the waiting room, then start
+  the battle. Free-for-all: last ship afloat wins.
+- **Join** — open an invite link or enter the room code.
 
-Multiplayer is peer-to-peer over WebRTC (via [PeerJS](https://peerjs.com)).
-There is no game server to run: PeerJS's free public broker is used only to
-exchange the initial connection handshake, after which all gameplay data flows
-directly between the two browsers. The host's browser is authoritative — it
-runs the full simulation and streams state snapshots to the guest every frame,
-while the guest sends back its steering and fire inputs, so the two screens
-can never drift out of sync.
+Multiplayer is peer-to-peer over WebRTC (via [PeerJS](https://peerjs.com)) in
+a star topology. There is no game server to run: PeerJS's free public broker
+is used only to exchange connection handshakes, after which all gameplay data
+flows directly between browsers. The host's browser is authoritative — it
+runs the full simulation and streams state snapshots to every guest each
+frame, while guests send back their steering and fire inputs, so no screen
+can drift out of sync. The practical ceiling is the host's WebRTC overhead,
+hence the cap of 16.
+
+Two protections against one person joining a room multiple times, both
+best-effort (airtight identity would need accounts and a server):
+
+- A random **device ID** stored in `localStorage` is sent with every join;
+  the host rejects a second join from the same browser. Bypassable via
+  incognito or a different browser.
+- An optional **"Block same-network joins"** host toggle: the host reads each
+  guest's public IP from the WebRTC connection stats and rejects duplicates.
+  Stronger, but two legitimate players on the same Wi-Fi share an IP, so it's
+  off by default.
+
+Rooms close to new joins once the battle starts; rematches (press `R`) reuse
+the same roster. A player who disconnects mid-battle sinks where they sailed.
 
 ## How to play
 
@@ -54,6 +71,11 @@ chosen at random each battle. All type stats live in one table
 - Each cannonball is tracked individually: every ball that connects removes
   exactly 1 health and triggers an explosion at the impact point, so partial
   broadside hits deal partial damage.
+- Broadsides auto-aim at your **nearest** living enemy: the volley fires from
+  whichever side of your hull faces them. In free-for-all, every other ship
+  is a valid target — there are no teams.
+- Multiplayer fleets spawn evenly spaced on a ring around the arena's center,
+  each ship heading along the ring.
 - Cannonballs have a maximum range (~320 px) and splash harmlessly past it.
 - Hit detection tests each ball against the target ship's rotated bounding box.
 - The player reloads faster than the enemy (1.4 s vs 2.2 s) to offset the AI's
@@ -94,9 +116,10 @@ npm run build    # type-check and build static files into dist/
 ```
 
 Requires Node 20.19+ or 22.12+ (Vite 8). `e2e-test.mjs` is a Playwright smoke
-test that opens two headless browsers, connects them through the real PeerJS
-broker, and plays a few seconds of a match — run it with `npm run preview`
-serving `dist/` on port 4173, then `node e2e-test.mjs`.
+test that connects three headless browsers through the real PeerJS broker,
+checks that duplicate-device and over-capacity joins are rejected, and plays
+a few seconds of a 3-way match — run it with `npm run preview` serving
+`dist/` on port 4173, then `node e2e-test.mjs`.
 
 ## Deployment
 

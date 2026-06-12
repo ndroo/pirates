@@ -1,6 +1,6 @@
 import { Game, WORLD_H, WORLD_W, type GameMode } from './game';
 import { Input } from './input';
-import { hostGame, joinGame } from './net';
+import { hostGame, joinGame, type BattleMode } from './net';
 import './style.css';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -26,6 +26,7 @@ const hostBtn = document.getElementById('host-btn') as HTMLButtonElement;
 const joinBtn = document.getElementById('join-btn') as HTMLButtonElement;
 const codeInput = document.getElementById('code-input') as HTMLInputElement;
 const capSelect = document.getElementById('cap-select') as HTMLSelectElement;
+const modeSelect = document.getElementById('mode-select') as HTMLSelectElement;
 const ipCheck = document.getElementById('ip-check') as HTMLInputElement;
 const shareRow = document.getElementById('share-row') as HTMLDivElement;
 const shareLink = document.getElementById('share-link') as HTMLInputElement;
@@ -49,12 +50,15 @@ function setBusy(busy: boolean) {
   joinBtn.disabled = busy;
   codeInput.disabled = busy;
   capSelect.disabled = busy;
+  modeSelect.disabled = busy;
   ipCheck.disabled = busy;
 }
 
 function startGame(mode: GameMode) {
   lobby.remove();
-  new Game(ctx, new Input(), mode).start();
+  const game = new Game(ctx, new Input(), mode);
+  (window as { __game?: Game }).__game = game; // for the e2e smoke test
+  game.start();
 }
 
 function describeError(err: unknown): string {
@@ -101,7 +105,7 @@ hostBtn.addEventListener('click', async () => {
     startBtn.addEventListener('click', () => {
       net.markStarted();
       net.broadcast({ t: 'go-select' });
-      startGame({ kind: 'host', net });
+      startGame({ kind: 'host', net, battle: modeSelect.value as BattleMode });
     });
   } catch (err) {
     status.textContent = describeError(err);

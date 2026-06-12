@@ -1,5 +1,3 @@
-import type { Ship } from './ship';
-
 const SPEED = 260; // px/s
 const MAX_RANGE = 320; // px before the ball splashes into the sea
 
@@ -7,18 +5,20 @@ export class Cannonball {
   x: number;
   y: number;
   spent = false;
-  readonly owner: Ship;
+  // Player slot id, not a Ship: the shooter may sink and respawn as a new
+  // Ship while this ball is still in flight.
+  readonly ownerId: number;
 
   private vx: number;
   private vy: number;
   private traveled = 0;
 
-  constructor(x: number, y: number, direction: number, owner: Ship) {
+  constructor(x: number, y: number, direction: number, ownerId: number) {
     this.x = x;
     this.y = y;
     this.vx = Math.cos(direction) * SPEED;
     this.vy = Math.sin(direction) * SPEED;
-    this.owner = owner;
+    this.ownerId = ownerId;
   }
 
   update(dt: number) {

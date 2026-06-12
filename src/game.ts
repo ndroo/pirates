@@ -2,7 +2,7 @@ import { decideTurn, wantsToFire } from './ai';
 import { Cannonball, drawCannonball } from './cannonball';
 import { Explosion } from './explosion';
 import type { Input } from './input';
-import type { GuestNet, HostNet, NetMessage, ShipSnap } from './net';
+import type { BattleMode, GuestNet, HostNet, NetMessage, ShipSnap } from './net';
 import { Ship, SHIP_TYPES, type ShipTypeName, type Turn } from './ship';
 
 // Fixed logical arena so all players see the same battlefield; the canvas is
@@ -13,6 +13,8 @@ export const WORLD_H = 720;
 const MAX_DT = 0.05; // s; clamp so tab-switch pauses don't teleport ships
 const PLAYER_RELOAD = 1.4; // s between broadsides
 const AI_RELOAD = 2.2; // the AI aims perfectly, so it reloads slower
+const RESPAWN_DELAY = 3; // s between fully sinking and reappearing
+const SINK_TARGET = 5; // respawn mode: sinks needed to win the round
 
 // One distinct hull color per player slot (host is 0).
 export const PLAYER_COLORS = [
@@ -22,7 +24,7 @@ export const PLAYER_COLORS = [
 
 export type GameMode =
   | { kind: 'solo' }
-  | { kind: 'host'; net: HostNet }
+  | { kind: 'host'; net: HostNet; battle: BattleMode }
   | { kind: 'guest'; net: GuestNet };
 
 const SELECT_KEYS: Record<string, ShipTypeName> = {
@@ -51,6 +53,9 @@ interface Slot {
   pick: ShipTypeName | null;
   ship: Ship | null;
   input: { turn: Turn; fire: boolean; restart: boolean }; // latest remote keys
+  score: number; // ships sunk (respawn mode)
+  respawnIn: number | null; // s until respawn, once fully sunk
+  left: boolean; // disconnected mid-battle; never respawns
 }
 
 function newSlot(id: number, ai = false): Slot {
@@ -61,6 +66,9 @@ function newSlot(id: number, ai = false): Slot {
     pick: null,
     ship: null,
     input: { turn: 0, fire: false, restart: false },
+    score: 0,
+    respawnIn: null,
+    left: false,
   };
 }
 
@@ -70,6 +78,8 @@ export class Game {
   private mode: GameMode;
 
   private phase: 'select' | 'battle' = 'select';
+  private battleMode: BattleMode = 'elimination';
+  private target = SINK_TARGET; // respawn mode: sinks needed to win
   private slots: Slot[] = [];
   private selfId: number;
   private myPick: ShipTypeName | null = null;
@@ -91,6 +101,7 @@ export class Game {
     this.selfId = mode.kind === 'guest' ? mode.net.selfId : 0;
 
     if (mode.kind === 'host') {
+      this.battleMode = mode.battle;
       mode.net.onMessage = (id, msg) => this.handleGuestMessage(id, msg);
       mode.net.onGuestLeave = (id) => this.dropPlayer(id);
     } else if (mode.kind === 'guest') {
@@ -130,7 +141,15 @@ export class Game {
   }
 
   private get over(): boolean {
-    return this.phase === 'battle' && this.aliveSlots.length <= 1;
+    if (this.phase !== 'battle') return false;
+    if (this.battleMode === 'respawn') return this.slots.some((s) => s.score >= this.target);
+    return this.aliveSlots.length <= 1;
+  }
+
+  private get winner(): Slot | undefined {
+    if (!this.over) return undefined;
+    if (this.battleMode === 'respawn') return this.slots.find((s) => s.score >= this.target);
+    return this.aliveSlots[0];
   }
 
   // --- messages ---
@@ -156,6 +175,8 @@ export class Game {
         this.readyInfo = { ready: msg.ready, total: msg.total };
         break;
       case 'start':
+        this.battleMode = msg.mode;
+        this.target = msg.target;
         this.slots = msg.ships.map((sp) => {
           const slot = newSlot(sp.id);
           slot.pick = sp.type;
@@ -177,8 +198,10 @@ export class Game {
   }
 
   private applySnap(snap: ShipSnap) {
-    const ship = this.slots.find((s) => s.id === snap.id)?.ship;
-    if (!ship) return;
+    const slot = this.slots.find((s) => s.id === snap.id);
+    if (!slot?.ship) return;
+    slot.score = snap.score;
+    const ship = slot.ship;
     ship.x = snap.x;
     ship.y = snap.y;
     ship.heading = snap.heading;
@@ -194,8 +217,9 @@ export class Game {
       this.slots = this.slots.filter((s) => s !== slot);
       this.broadcastPicked();
       this.maybeStartBattle();
-    } else if (slot.ship) {
-      slot.ship.health = 0; // their ship sinks where it sailed
+    } else {
+      slot.left = true;
+      if (slot.ship) slot.ship.health = 0; // their ship sinks where it sailed
     }
   }
 
@@ -222,22 +246,25 @@ export class Game {
 
   // --- battle setup ---
 
+  /** (Re)place a slot's ship on the spawn ring at the given angle. */
+  private spawnShip(slot: Slot, angle: number) {
+    slot.ship = new Ship(
+      WORLD_W / 2 + Math.cos(angle) * WORLD_W * 0.32,
+      WORLD_H / 2 + Math.sin(angle) * WORLD_H * 0.32,
+      angle + Math.PI / 2, // tangent to the ring
+      slot.color,
+      slot.pick!,
+    );
+    slot.respawnIn = null;
+  }
+
   /** Host/solo: once everyone has picked, spawn the fleet in a ring and go. */
   private maybeStartBattle() {
     if (this.phase !== 'select' || this.slots.some((s) => !s.pick)) return;
 
     const n = this.slots.length;
-    const rx = WORLD_W * 0.32;
-    const ry = WORLD_H * 0.32;
     this.slots.forEach((slot, i) => {
-      const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
-      slot.ship = new Ship(
-        WORLD_W / 2 + Math.cos(angle) * rx,
-        WORLD_H / 2 + Math.sin(angle) * ry,
-        angle + Math.PI / 2, // tangent to the ring, so the fleet starts circling
-        slot.color,
-        slot.pick!,
-      );
+      this.spawnShip(slot, (i / n) * Math.PI * 2 - Math.PI / 2);
     });
     this.cannonballs = [];
     this.explosions = [];
@@ -247,6 +274,8 @@ export class Game {
     if (this.mode.kind === 'host') {
       this.mode.net.broadcast({
         t: 'start',
+        mode: this.battleMode,
+        target: this.target,
         ships: this.slots.map((s) => ({
           id: s.id,
           type: s.pick!,
@@ -321,6 +350,14 @@ export class Game {
       const ship = slot.ship;
       if (!ship) continue;
 
+      // Respawn mode: a fully sunk ship reappears after a short delay.
+      if (this.battleMode === 'respawn' && !ship.alive && !slot.left && !this.over && ship.sinkProgress >= 1) {
+        slot.respawnIn ??= RESPAWN_DELAY;
+        slot.respawnIn -= dt;
+        if (slot.respawnIn <= 0) this.spawnShip(slot, Math.random() * Math.PI * 2);
+        continue;
+      }
+
       let shipTurn: Turn = 0;
       let fire = false;
       if (slot.id === this.selfId) {
@@ -339,7 +376,7 @@ export class Game {
 
       if (!this.over && fire && ship.alive && ship.reload <= 0) {
         const target = this.nearestEnemy(ship);
-        if (target) this.fireBroadside(ship, target, slot.ai ? AI_RELOAD : PLAYER_RELOAD);
+        if (target) this.fireBroadside(slot, target);
       }
     }
 
@@ -348,10 +385,14 @@ export class Game {
       if (ball.spent) continue;
       for (const slot of this.slots) {
         const target = slot.ship;
-        if (!target || target === ball.owner || !target.alive) continue;
+        if (!target || slot.id === ball.ownerId || !target.alive) continue;
         if (target.containsPoint(ball.x, ball.y)) {
           ball.spent = true;
           target.takeHit();
+          if (!target.alive) {
+            const shooter = this.slots.find((s) => s.id === ball.ownerId);
+            if (shooter) shooter.score++;
+          }
           this.explosions.push(new Explosion(ball.x, ball.y));
           this.pendingBoom.push({ x: ball.x, y: ball.y });
           break;
@@ -373,6 +414,7 @@ export class Game {
           heading: s.ship!.heading,
           health: s.ship!.health,
           sink: s.ship!.sinkProgress,
+          score: s.score,
         })),
         balls: this.cannonballs.map((b) => ({ x: b.x, y: b.y })),
         boom: this.pendingBoom,
@@ -403,7 +445,9 @@ export class Game {
   }
 
   /** Fire a volley from whichever side of the shooter faces the target. */
-  private fireBroadside(shooter: Ship, target: Ship, reload: number) {
+  private fireBroadside(shooterSlot: Slot, target: Ship) {
+    const shooter = shooterSlot.ship!;
+    const reload = shooterSlot.ai ? AI_RELOAD : PLAYER_RELOAD;
     const bearing = Math.atan2(target.y - shooter.y, target.x - shooter.x);
     const side = Math.sin(bearing - shooter.heading) >= 0 ? 1 : -1;
     const dir = shooter.heading + (side * Math.PI) / 2;
@@ -420,7 +464,7 @@ export class Game {
           shooter.x + fx * along + sx * (shooter.width / 2),
           shooter.y + fy * along + sy * (shooter.width / 2),
           dir,
-          shooter,
+          shooterSlot.id,
         ),
       );
     }
@@ -448,6 +492,7 @@ export class Game {
         if (slot.ship) this.drawHealthRow(slot, row);
       });
 
+      this.drawRespawnNotice();
       if (this.over) this.drawGameOver();
     }
 
@@ -560,12 +605,33 @@ export class Game {
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff';
-    ctx.fillText(`${this.slotLabel(slot)} (${ship.type})`, x0 - 26, y + segH / 2);
+    const score = this.battleMode === 'respawn' ? ` · ${slot.score} sunk` : '';
+    ctx.fillText(`${this.slotLabel(slot)} (${ship.type})${score}`, x0 - 26, y + segH / 2);
 
     for (let i = 0; i < ship.maxHealth; i++) {
       ctx.fillStyle = i < ship.health ? '#4caf50' : 'rgba(255, 255, 255, 0.25)';
       ctx.fillRect(x0 + i * (segW + gap), y, segW, segH);
     }
+  }
+
+  /** Respawn mode: tell a sunk player their ship is coming back. */
+  private drawRespawnNotice() {
+    const self = this.selfSlot;
+    if (
+      this.battleMode !== 'respawn' ||
+      this.over ||
+      !self?.ship ||
+      self.ship.alive ||
+      self.ship.sinkProgress < 1
+    ) {
+      return;
+    }
+    const ctx = this.ctx;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.font = 'bold 28px system-ui, sans-serif';
+    ctx.fillText('You sank — respawning…', WORLD_W / 2, WORLD_H / 2);
   }
 
   private drawGameOver() {
@@ -581,14 +647,14 @@ export class Game {
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 42px system-ui, sans-serif';
 
-    const winner = this.aliveSlots[0];
+    const winner = this.winner;
     let title: string;
     if (this.mode.kind === 'solo') {
       title = winner?.id === this.selfId ? 'Enemy ship destroyed!' : 'Your ship was destroyed!';
     } else if (!winner) {
       title = 'All ships sank!';
     } else if (winner.id === this.selfId) {
-      title = 'Victory! Last ship afloat!';
+      title = this.battleMode === 'respawn' ? `Victory! First to ${this.target} sinks!` : 'Victory! Last ship afloat!';
     } else {
       title = `${this.slotLabel(winner)} wins!`;
     }

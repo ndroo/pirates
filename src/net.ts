@@ -1,6 +1,9 @@
 import { Peer, type DataConnection } from 'peerjs';
 import type { ShipTypeName, Turn } from './ship';
 
+/** How a multiplayer battle ends. */
+export type BattleMode = 'elimination' | 'respawn';
+
 /** Snapshot of one ship inside a state message. */
 export interface ShipSnap {
   id: number;
@@ -9,6 +12,7 @@ export interface ShipSnap {
   heading: number;
   health: number;
   sink: number;
+  score: number; // ships sunk (respawn mode)
 }
 
 /** Initial ship placement sent when a battle starts. */
@@ -36,7 +40,7 @@ export type NetMessage =
   | { t: 'lobby'; players: number; cap: number }
   | { t: 'go-select' } // leave the waiting room / start a rematch
   | { t: 'picked'; ready: number; total: number }
-  | { t: 'start'; ships: ShipSpawn[] }
+  | { t: 'start'; mode: BattleMode; target: number; ships: ShipSpawn[] }
   | {
       t: 'state';
       ships: ShipSnap[];

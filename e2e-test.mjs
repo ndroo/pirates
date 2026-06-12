@@ -83,6 +83,66 @@ await host.keyboard.down('ArrowLeft');
 await host.waitForTimeout(2500);
 await host.screenshot({ path: 'shot-host-battle.png' });
 await guest2.screenshot({ path: 'shot-guest-battle.png' });
+for (const p of [host, guest1, guest2]) await p.close();
+console.log('elimination round OK');
+
+// --- Respawn mode: two small ships slug it out until someone sinks, ---
+// --- scores a point, and the victim reappears.                      ---
+const host2 = await newPlayer('host2', { width: 1300, height: 760 });
+await host2.goto(GAME_URL);
+await host2.selectOption('#cap-select', '2');
+await host2.selectOption('#mode-select', 'respawn');
+await host2.click('#host-btn');
+await host2.waitForFunction(statusIncludes('Room code'), null, { timeout: 20000 });
+const link2 = await host2.inputValue('#share-link');
+
+const guest3 = await newPlayer('guest3', { width: 1000, height: 700 });
+await guest3.goto(link2);
+await host2.waitForFunction(() => document.getElementById('player-list').textContent.startsWith('2/2'));
+await host2.click('#start-btn');
+for (const p of [host2, guest3]) await p.waitForSelector('#lobby', { state: 'detached', timeout: 15000 });
+
+await hold(host2, 'Digit1'); // small ships sink fast
+await hold(guest3, 'Digit1');
+await host2.waitForTimeout(500);
+await host2.keyboard.down('Space'); // both auto-aim and blast away
+await guest3.keyboard.down('Space');
+
+// Left to sail freely the ships may never meet, so repeatedly drop them
+// broadside-to-broadside until someone sinks and credits the shooter.
+let scored = false;
+for (let i = 0; i < 10 && !scored; i++) {
+  await host2.evaluate(() => {
+    const g = window.__game;
+    const [a, b] = [g.slots[0].ship, g.slots[1].ship];
+    // Same heading = zero relative velocity, so the broadsides can't miss.
+    if (a?.alive && b?.alive) {
+      a.x = 400; a.y = 320; a.heading = 0;
+      b.x = 400; b.y = 400; b.heading = 0;
+    }
+  });
+  scored = await host2
+    .waitForFunction(() => window.__game.slots.some((s) => s.score >= 1), null, { timeout: 6000, polling: 250 })
+    .then(() => true)
+    .catch(() => false);
+}
+if (!scored) throw new Error('no ship sank in the respawn round');
+console.log('first sink scored');
+// ...the guest's HUD must learn the score...
+await guest3.waitForFunction(
+  () => window.__game.slots.some((s) => s.score >= 1),
+  null, { timeout: 15000, polling: 500 },
+);
+// ...and the sunk ship must come back while the round is still going.
+await host2.waitForFunction(
+  () => {
+    const g = window.__game;
+    return g.phase === 'battle' && g.slots.every((s) => s.ship && s.ship.alive);
+  },
+  null, { timeout: 30000, polling: 500 },
+);
+console.log('sunk ship respawned ✓');
+await host2.screenshot({ path: 'shot-respawn-battle.png' });
 
 await browser.close();
 console.log('done');

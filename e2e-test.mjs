@@ -52,28 +52,52 @@ async function joinVia(page, link, name) {
 // --- Resumable, streaming runner -----------------------------------------
 // Each phase is independent (own browser pages). Passed phases are recorded to
 // a checkpoint so a re-run resumes where it stopped. A per-phase watchdog kills
-// a hung phase rather than letting it spin forever. Set E2E_RESET=1 for a clean
-// run; E2E_CKPT to point at a different checkpoint file.
+// a hung phase rather than letting it spin forever.
+//   E2E_RESET=1   start a clean run (ignore the checkpoint)
+//   E2E_ONLY=name run just the phase(s) whose name contains this substring
+//   E2E_CKPT=path use a different checkpoint file
+const PHASE_NAMES = ['multiplayer', 'midjoin', 'solo', 'mobile', 'invite-escape', 'submarine', 'career'];
 const CKPT = process.env.E2E_CKPT || '/tmp/e2e-ckpt.json';
+const ONLY = process.env.E2E_ONLY || '';
 let donePhases = [];
 if (process.env.E2E_RESET) {
   try { fs.unlinkSync(CKPT); } catch {}
 } else {
   try { donePhases = JSON.parse(fs.readFileSync(CKPT, 'utf8')); } catch {}
 }
+
+const RUN_START = Date.now();
+let total = 0; // checks passed across the whole run
+let phaseCount = 0; // checks passed in the current phase
+
+// Color only on a real terminal — piped to a log/the chat, stay plain text.
+const TTY = process.stdout.isTTY;
+const col = (code, s) => (TTY ? `\x1b[${code}m${s}\x1b[0m` : s);
+
+/** Record one passing check — counted and grouped under its phase. */
+function pass(label) {
+  total++;
+  phaseCount++;
+  console.log(`   ${col('32', '✓')} ${label}`);
+}
+
 async function phase(name, fn) {
+  const idx = `${PHASE_NAMES.indexOf(name) + 1}/${PHASE_NAMES.length}`;
+  if (ONLY && !name.includes(ONLY)) return;
   if (donePhases.includes(name)) {
-    console.log(`↷ skip ${name} (already passed)`);
+    console.log(`\n${col('2', `↷ phase ${idx}: ${name} — skipped (already passed)`)}`);
     return;
   }
-  console.log(`▶ ${name}`);
+  phaseCount = 0;
+  const start = Date.now();
+  console.log(`\n${col('1', `▶ phase ${idx}: ${name}`)}`);
   await Promise.race([
     fn(),
     new Promise((_, rej) => setTimeout(() => rej(new Error(`watchdog: phase '${name}' exceeded 240s`)), 240000)),
   ]);
   donePhases.push(name);
   fs.writeFileSync(CKPT, JSON.stringify(donePhases));
-  console.log(`✅ ${name}`);
+  console.log(`   ${col('32', `└─ ${phaseCount} checks · ${((Date.now() - start) / 1000).toFixed(0)}s`)}`);
 }
 
 try {
@@ -99,7 +123,7 @@ console.log('guest1 joined');
 const dupTab = await guest1.context().newPage();
 await dupTab.goto(link);
 await dupTab.waitForFunction(statusIncludes('already in that game'), null, { timeout: 30000 });
-console.log('duplicate-device join rejected ✓');
+pass('duplicate-device join rejected');
 await dupTab.close();
 
 const guest2 = await newPlayer('guest2', { width: 900, height: 600 });
@@ -111,7 +135,7 @@ console.log('guest2 joined');
 const extra = await newPlayer('extra', { width: 800, height: 600 });
 await joinVia(extra, link, 'Latecomer');
 await extra.waitForFunction(statusIncludes('full'), null, { timeout: 30000 });
-console.log('over-capacity join rejected ✓');
+pass('over-capacity join rejected');
 await extra.close();
 
 await host.waitForFunction(() => document.getElementById('player-count').textContent.startsWith('3/3'));
@@ -163,7 +187,7 @@ for (const p of [host2, guest3]) await p.waitForSelector('#lobby', { state: 'det
 // Names travel with the join: the host's roster must know the guest as Anne.
 const roster = await host2.evaluate(() => window.__game.roster);
 if (!roster.some((r) => r.label === 'Anne')) throw new Error(`guest name missing from roster: ${JSON.stringify(roster)}`);
-console.log('player names in roster ✓');
+pass('player names in roster');
 
 await hold(host2, 'Digit1'); // small ships sink fast
 await hold(guest3, 'Digit1');
@@ -180,18 +204,18 @@ const guestIslands = await islandKey(guest3);
 if (hostIslands === '[]' || hostIslands !== guestIslands) {
   throw new Error(`island mismatch: host ${hostIslands} guest ${guestIslands}`);
 }
-console.log(`islands synced ✓`);
+pass(`islands synced`);
 const hostWind = await host2.evaluate(() => window.__game.wind);
 const guestWind = await guest3.evaluate(() => window.__game.wind);
 if (hostWind.strength <= 0 || JSON.stringify(hostWind) !== JSON.stringify(guestWind)) {
   throw new Error(`wind mismatch: host ${JSON.stringify(hostWind)} guest ${JSON.stringify(guestWind)}`);
 }
-console.log(`wind synced (strength ${hostWind.strength.toFixed(2)}) ✓`);
+pass(`wind synced (strength ${hostWind.strength.toFixed(2)})`);
 
 // Fire mode opens in broadside (volley), label and behaviour agreeing.
 const fm = await host2.evaluate(() => ({ mode: window.__game.myFireMode, slot: window.__game.slots[0].fireMode }));
 if (fm.mode !== 'volley' || fm.slot !== 'volley') throw new Error(`battle did not open in broadside: ${JSON.stringify(fm)}`);
-console.log('battle opens in broadside ✓');
+pass('battle opens in broadside');
 
 // Clouds are generated and synced (immutable radii match across screens).
 const cloudR = (page) => page.evaluate(() => window.__game.clouds.map((c) => Math.round(c.r)).sort((a, b) => a - b));
@@ -200,7 +224,7 @@ const gc = await cloudR(guest3);
 if (!hc.length || JSON.stringify(hc) !== JSON.stringify(gc)) {
   throw new Error(`cloud mismatch: host ${JSON.stringify(hc)} guest ${JSON.stringify(gc)}`);
 }
-console.log(`clouds synced (${hc.length}) ✓`);
+pass(`clouds synced (${hc.length})`);
 
 // Iceberg: scrapes off a chunk of health but does not sink outright.
 const berg = await host2.evaluate(() => {
@@ -220,7 +244,7 @@ await host2.waitForFunction(
   { timeout: 4000 },
 );
 const bergHp = await host2.evaluate(() => window.__game.slots[0].ship.health);
-console.log(`iceberg scrape: ${berg.max} → ${bergHp} HP, still afloat ✓`);
+pass(`iceberg scrape: ${berg.max} → ${bergHp} HP, still afloat`);
 await host2.evaluate(() => {
   const g = window.__game;
   g.icebergs = [];
@@ -237,7 +261,7 @@ await host2.evaluate(() => {
 });
 await host2.waitForFunction(() => !window.__game.slots[0].ship.alive, null, { timeout: 5000 });
 await host2.waitForFunction(() => window.__game.slots[0].ship.alive, null, { timeout: 15000 });
-console.log('ship sank on island and respawned ✓');
+pass('ship sank on island and respawned');
 
 // --- Rolling fire: F toggles, one gun per press; the ball splashes. ---
 await host2.evaluate(() => {
@@ -254,10 +278,10 @@ await pressUntil(host2, 'KeyF', () => window.__game.myFireMode === 'rolling', 'r
 await pressUntil(host2, 'Space', () => window.__game.cannonballs.length > 0, 'a rolling shot');
 const ballCount = await host2.evaluate(() => window.__game.cannonballs.length);
 if (ballCount !== 1) throw new Error(`rolling fire launched ${ballCount} balls from one press`);
-console.log('rolling fire: one gun per press ✓');
+pass('rolling fire: one gun per press');
 // The splash is brief (~0.5s), so poll fast to catch it under throttling.
 await host2.waitForFunction(() => window.__game.splashes.length > 0, null, { timeout: 8000, polling: 50 });
-console.log('cannonball splashed into the sea ✓');
+pass('cannonball splashed into the sea');
 await pressUntil(host2, 'KeyF', () => window.__game.myFireMode === 'volley', 'volley mode');
 
 // --- Barrel mines: one afloat at a time, 10s recharge, 2 damage. ---
@@ -266,7 +290,7 @@ await pressUntil(host2, 'KeyS', () => window.__game.mines.length === 1, 'a dropp
 if (!(await host2.evaluate(() => window.__game.mines[0].armed))) {
   throw new Error('barrel did not arm immediately on drop');
 }
-console.log('barrel arms immediately on drop ✓');
+pass('barrel arms immediately on drop');
 const mineCool = await host2.evaluate(() => window.__game.slots[0].mineCool);
 if (mineCool < 8) throw new Error(`mine recharge not engaged (${mineCool})`);
 await hold(host2, 'KeyS');
@@ -286,7 +310,7 @@ await host2.waitForFunction(
   () => window.__game.mines.length === 0 && window.__game.slots[1].ship.health === 1,
   null, { timeout: 5000 },
 );
-console.log('barrel mine: single stock, recharge, 2 damage on contact ✓');
+pass('barrel mine: single stock, recharge, 2 damage on contact');
 
 // --- Ramming: a bow in the hull costs half max health. ---
 await host2.evaluate(() => {
@@ -302,7 +326,7 @@ await host2.waitForFunction(
   () => window.__game.slots[1].ship.health === window.__game.slots[1].ship.maxHealth - Math.ceil(window.__game.slots[1].ship.maxHealth / 2),
   null, { timeout: 3000 },
 );
-console.log('ramming takes half max health ✓');
+pass('ramming takes half max health');
 
 // --- Solid pier: a ship that hits a jetty (off the island itself) sinks. ---
 await host2.evaluate(() => {
@@ -315,7 +339,7 @@ await host2.evaluate(() => {
   a.y = 300;
 });
 await host2.waitForFunction(() => !window.__game.slots[0].ship.alive, null, { timeout: 4000 });
-console.log('solid pier sinks a ship ✓');
+pass('solid pier sinks a ship');
 
 // --- Cannonballs scar islands (damaged, never destroyed) and the scar syncs. ---
 await host2.evaluate(() => {
@@ -335,11 +359,11 @@ await host2.bringToFront();
 await host2.keyboard.down('Space');
 await host2.waitForFunction(() => window.__game.islands[0].craters.length > 0, null, { timeout: 8000, polling: 50 });
 await host2.keyboard.up('Space');
-console.log('cannonball scars the island ✓');
+pass('cannonball scars the island');
 await guest3.waitForFunction(() => (window.__game.islands[0]?.craters?.length ?? 0) > 0, null, { timeout: 5000, polling: 100 });
 const islandAlive = await host2.evaluate(() => window.__game.islands.length === 1);
 if (!islandAlive) throw new Error('island was destroyed — it should only be scarred');
-console.log('island scar synced to guest; island survives ✓');
+pass('island scar synced to guest; island survives');
 
 // --- Icebergs shatter under gunfire... ---
 await host2.evaluate(() => {
@@ -355,7 +379,7 @@ await host2.evaluate(() => {
 await host2.keyboard.down('Space');
 await host2.waitForFunction(() => window.__game.icebergs.length === 0, null, { timeout: 8000, polling: 50 });
 await host2.keyboard.up('Space');
-console.log('gunfire shatters an iceberg ✓');
+pass('gunfire shatters an iceberg');
 
 // --- ...and under ramming impact (the ship survives the scrape). ---
 await host2.evaluate(() => {
@@ -370,7 +394,7 @@ await host2.waitForFunction(
   () => window.__game.icebergs.length === 0 && window.__game.slots[0].ship.alive,
   null, { timeout: 5000 },
 );
-console.log('ramming shatters an iceberg, ship survives ✓');
+pass('ramming shatters an iceberg, ship survives');
 
 // --- Cannon fire blows a pier apart, and that frees the lane on the guest. ---
 await host2.evaluate(() => {
@@ -390,9 +414,9 @@ await host2.evaluate(() => {
 await host2.keyboard.down('Space');
 await host2.waitForFunction(() => window.__game.islands[0].pier == null, null, { timeout: 9000, polling: 50 });
 await host2.keyboard.up('Space');
-console.log('cannon fire destroys a pier ✓');
+pass('cannon fire destroys a pier');
 await guest3.waitForFunction(() => window.__game.islands[0]?.pier == null, null, { timeout: 5000, polling: 100 });
-console.log('pier destruction synced to guest ✓');
+pass('pier destruction synced to guest');
 await host2.evaluate(() => {
   const g = window.__game;
   g.icebergs = [];
@@ -414,7 +438,7 @@ await host2.waitForSelector('#chat-bar:not([hidden])', { timeout: 3000 });
 await host2.fill('#chat-input', 'prepare to be boarded');
 await host2.keyboard.press('Enter');
 await guest3.waitForFunction(() => window.__game.chats.some((c) => c.from === 0), null, { timeout: 5000 });
-console.log('banter relayed both ways ✓');
+pass('banter relayed both ways');
 
 // --- Host pause (via the P key) freezes both screens; resume frees them. ---
 await host2.evaluate(() => { window.__game.slots[1].ship.health = window.__game.slots[1].ship.maxHealth; });
@@ -426,12 +450,12 @@ const frozen = await guest3.evaluate(() => window.__game.slots[1].ship.heading);
 await guest3.waitForTimeout(700);
 const stillFrozen = await guest3.evaluate(() => window.__game.slots[1].ship.heading);
 if (frozen !== stillFrozen) throw new Error('guest ship moved while paused');
-console.log('host pause (P key) froze the battle on the guest ✓');
+pass('host pause (P key) froze the battle on the guest');
 await host2.keyboard.press('p');
 await guest3.waitForFunction(() => !window.__game.isPaused, null, { timeout: 5000 });
 await guest3.waitForFunction((h) => window.__game.slots[1].ship.heading !== h, stillFrozen, { timeout: 5000 });
 await guest3.keyboard.up('ArrowLeft');
-console.log('resume (P key) unfroze the battle ✓');
+pass('resume (P key) unfroze the battle');
 
 // --- Drop sail: furled, the ship makes no headway and rides the wind instead. ---
 await host2.evaluate(() => {
@@ -454,7 +478,7 @@ const drift = await host2.evaluate(() => {
 if (drift.dx < 20 || Math.abs(drift.dy) > Math.abs(drift.dx)) {
   throw new Error(`furled ship did not drift downwind: ${JSON.stringify(drift)}`);
 }
-console.log(`drop sail: drifts downwind ${Math.round(drift.dx)}px, not under power ✓`);
+pass(`drop sail: drifts downwind ${Math.round(drift.dx)}px, not under power`);
 await pressUntil(host2, 'KeyW', () => window.__game.myFurled === false, 'sails reset');
 
 await host2.keyboard.down('Space'); // both auto-aim and blast away
@@ -516,7 +540,7 @@ await host2.waitForFunction(
   },
   null, { timeout: 30000, polling: 500 },
 );
-console.log('sunk ship respawned ✓');
+pass('sunk ship respawned');
 await host2.screenshot({ path: 'shot-respawn-battle.png' });
 
 // Host panel: switch the rules to elimination mid-battle...
@@ -524,7 +548,7 @@ await host2.click('#panel-toggle');
 await host2.screenshot({ path: 'shot-host-panel.png' });
 await host2.selectOption('#panel-mode', 'elimination');
 await guest3.waitForFunction(() => window.__game.battleMode === 'elimination', null, { timeout: 10000 });
-console.log('mid-game rule change reached the guest ✓');
+pass('mid-game rule change reached the guest');
 
 // ...then kick the guest: they see the notice, their ship sinks for the host.
 await host2.click('#panel-players .kick-btn');
@@ -536,7 +560,7 @@ await host2.waitForFunction(
   },
   null, { timeout: 10000 },
 );
-console.log('kick: guest notified, ship sunk, roster updated ✓');
+pass('kick: guest notified, ship sunk, roster updated');
 await guest3.screenshot({ path: 'shot-kicked.png' });
 
 // --- Host refresh: the room must come back under the same code, ---
@@ -549,7 +573,7 @@ if (restoredLink !== link2) throw new Error(`room code changed after refresh: ${
 const guest4 = await newPlayer('guest4', { width: 900, height: 600 });
 await joinVia(guest4, link2, 'Calico Jack');
 await host2.waitForFunction(() => document.getElementById('player-count').textContent.startsWith('2/2'), null, { timeout: 30000 });
-console.log('host refresh resumed the room; old invite link still valid ✓');
+pass('host refresh resumed the room; old invite link still valid');
 
 });
 
@@ -583,12 +607,12 @@ await late.waitForFunction(
 );
 await hostM.waitForFunction(() => window.__game.slots.filter((s) => s.ship?.alive).length === 3, null, { timeout: 10000 });
 await early.waitForFunction(() => window.__game.slots.length === 3, null, { timeout: 10000 });
-console.log('latecomer joined mid-round on all screens ✓');
+pass('latecomer joined mid-round on all screens');
 
 await early.close();
 await late.close();
 await hostM.waitForFunction(() => window.__game.phase === 'select', null, { timeout: 20000 });
-console.log('empty room returns the host to the pre-game screen ✓');
+pass('empty room returns the host to the pre-game screen');
 await hostM.close();
 
 });
@@ -607,7 +631,7 @@ await solo.waitForFunction(() => window.__game.phase === 'battle', null, { timeo
 if (await solo.evaluate(() => window.__game.islands.some((i) => i.pier != null))) {
   throw new Error('a solo map generated a pier');
 }
-console.log('solo maps have no piers ✓');
+pass('solo maps have no piers');
 
 // Nobody spawns inside an iceberg's danger radius.
 const safeSpawns = await solo.evaluate(() =>
@@ -616,7 +640,7 @@ const safeSpawns = await solo.evaluate(() =>
   ),
 );
 if (!safeSpawns) throw new Error('a ship spawned inside an iceberg');
-console.log('spawns are clear of icebergs ✓');
+pass('spawns are clear of icebergs');
 
 // Fire mode persists across a rematch (remembered, not reset to broadside).
 await pressUntil(solo, 'KeyF', () => window.__game.myFireMode === 'rolling', 'rolling mode');
@@ -629,7 +653,7 @@ await solo.waitForFunction(() => window.__game.phase === 'battle', null, { timeo
 if (await solo.evaluate(() => window.__game.myFireMode !== 'rolling')) {
   throw new Error('fire mode was not remembered across the rematch');
 }
-console.log('fire mode persists across games ✓');
+pass('fire mode persists across games');
 await pressUntil(solo, 'KeyF', () => window.__game.myFireMode === 'volley', 'reset fire mode');
 
 // Isolate island avoidance: clear the round's random icebergs (a double
@@ -674,7 +698,7 @@ for (let k = 0; k < 8; k++) {
   if (!(await solo.evaluate(() => window.__game.slots[1].ship.alive))) groundings++;
 }
 if (groundings > 0) throw new Error(`AI ran aground ${groundings}/8 times`);
-console.log('AI dodged islands 8/8 ✓');
+pass('AI dodged islands 8/8');
 
 // Wind physics: the same ship covers more water downwind than upwind. Step
 // the ship's own integrator with a fixed dt so the result can't be skewed by
@@ -696,7 +720,7 @@ const measure = (against) =>
 const downwind = await measure(false);
 const upwind = await measure(true);
 if (downwind <= upwind * 1.02) throw new Error(`wind has no effect: downwind ${downwind} vs upwind ${upwind}`);
-console.log(`wind physics: downwind ${Math.round(downwind)}px vs upwind ${Math.round(upwind)}px ✓`);
+pass(`wind physics: downwind ${Math.round(downwind)}px vs upwind ${Math.round(upwind)}px`);
 
 });
 
@@ -718,7 +742,7 @@ await phone.waitForFunction(
   () => window.__game.phase === 'battle' && window.__game.slots[0].ship.type === 'medium',
   null, { timeout: 5000 },
 );
-console.log('mobile: tapped a ship card into battle ✓');
+pass('mobile: tapped a ship card into battle');
 
 if (!(await phone.isVisible('#tc-fire'))) throw new Error('touch controls not shown on phone');
 
@@ -737,7 +761,7 @@ await phone.waitForTimeout(500);
 const h1 = await phone.evaluate(() => window.__game.slots[0].ship.heading);
 await phone.locator('#tc-left').dispatchEvent('pointerup');
 if (h1 >= h0) throw new Error(`steer button did not turn the ship (${h0} -> ${h1})`);
-console.log('mobile: FIRE and steer buttons work ✓');
+pass('mobile: FIRE and steer buttons work');
 
 // Tap-to-restart from game over.
 await phone.evaluate(() => {
@@ -746,7 +770,7 @@ await phone.evaluate(() => {
 await phone.waitForTimeout(300);
 await phone.tap('canvas', { position: { x: canvasBox.width / 2, y: canvasBox.height / 2 } });
 await phone.waitForFunction(() => window.__game.phase === 'select', null, { timeout: 5000 });
-console.log('mobile: tap-to-restart works ✓');
+pass('mobile: tap-to-restart works');
 
 // Rematch select: the countdown reuses the previous ship automatically.
 const armed = await phone.evaluate(() => {
@@ -760,7 +784,7 @@ await phone.waitForFunction(
   () => window.__game.phase === 'battle' && window.__game.slots[0].pick === 'medium',
   null, { timeout: 5000 },
 );
-console.log('rematch auto-picked the previous ship ✓');
+pass('rematch auto-picked the previous ship');
 await phoneCtx.close();
 
 });
@@ -773,7 +797,7 @@ await loner.click('#invite-solo-btn');
 await loner.waitForSelector('#lobby', { state: 'detached', timeout: 5000 });
 const cleanUrl = await loner.evaluate(() => location.search);
 if (cleanUrl.includes('join')) throw new Error('solo escape left ?join in the URL');
-console.log('invite screen solo escape ✓');
+pass('invite screen solo escape');
 
 });
 
@@ -787,7 +811,7 @@ await subPage.bringToFront();
 await hold(subPage, 'Digit4'); // pick the submarine
 await subPage.waitForFunction(() => window.__game.phase === 'battle' && window.__game.slots[0].ship.type === 'sub', null, { timeout: 5000 });
 if ((await subPage.evaluate(() => window.__game.slots[0].ship.dive)) !== 0) throw new Error('sub did not start surfaced');
-console.log('submarine selectable, starts surfaced ✓');
+pass('submarine selectable, starts surfaced');
 
 // Place the enemy in broadside range below the sub for the firing checks.
 await subPage.evaluate(() => {
@@ -807,7 +831,7 @@ const t0 = await subPage.evaluate(() => performance.now());
 await subPage.waitForFunction(() => window.__game.slots[0].ship.dive >= 1, null, { timeout: 6000, polling: 50 });
 const diveMs = (await subPage.evaluate(() => performance.now())) - t0;
 if (diveMs < 2200 || diveMs > 4200) throw new Error(`dive took ${Math.round(diveMs)}ms, expected ~3000`);
-console.log(`submarine dove in ${Math.round(diveMs)}ms ✓`);
+pass(`submarine dove in ${Math.round(diveMs)}ms`);
 
 // No wake while submerged (slot 0 is the sub; the AI may still wake).
 await subPage.evaluate(() => { window.__game.wakes.clear(); });
@@ -815,7 +839,7 @@ await subPage.waitForTimeout(400);
 if ((await subPage.evaluate(() => window.__game.wakes.get(0)?.length ?? 0)) !== 0) {
   throw new Error('submerged submarine left a wake');
 }
-console.log('submerged sub leaves no wake ✓');
+pass('submerged sub leaves no wake');
 
 // Submerged, the sub fires an UNDERWATER torpedo, which slides past surface ships.
 await subPage.evaluate(() => {
@@ -831,41 +855,49 @@ await pressUntil(subPage, 'Space', () => window.__game.torpedoes.length > 0, 'an
 if (!(await subPage.evaluate(() => window.__game.torpedoes[0].underwater))) {
   throw new Error('submerged sub did not fire an underwater torpedo');
 }
-console.log('submerged sub fires underwater torpedoes ✓');
+pass('submerged sub fires underwater torpedoes');
 await subPage.waitForTimeout(1600); // torpedoes run their course past the surface ship
 if ((await subPage.evaluate(() => window.__game.slots[1].ship.health)) < (await subPage.evaluate(() => window.__surfHp))) {
   throw new Error('underwater torpedo struck a surface ship');
 }
-console.log('underwater torpedoes pass surface ships ✓');
+pass('underwater torpedoes pass surface ships');
 
 // Radar sweep paints a sonar contact on the submerged sub.
 await subPage.evaluate(() => { window.__game.pings.length = 0; window.__game.pingTimer = 1000; });
 await subPage.waitForFunction(() => window.__game.pings.length > 0, null, { timeout: 2000, polling: 50 });
-console.log('radar ping reveals the submerged sub ✓');
+pass('radar ping reveals the submerged sub');
 
-// Depth charges: as many tubes as cannons, and they hammer a sub at ANY depth —
-// here a surfaced one — while never scratching a surface boat.
+// Depth charges = cannon count, and they hammer a sub at ANY depth (here a
+// surfaced one) in the wide blast. Sub far from any surface ship to avoid rams.
 await subPage.evaluate(() => {
   const g = window.__game;
-  g.myDive = false; // bring the sub up and keep it there
-  const sub = g.slots[0].ship;
-  const surf = g.slots[1].ship;
-  sub.dive = 0;
-  sub.health = sub.maxHealth; surf.health = surf.maxHealth;
-  // Both within the blast radius, but far enough apart not to ram each other.
-  sub.x = 400; sub.y = 360; surf.x = 470; surf.y = 360;
-  window.__hp = { sub: sub.maxHealth, surf: surf.maxHealth, tubes: surf.dcReload.length, guns: surf.guns };
-  g.depthCharges.push({ x: 400, y: 360, ownerId: 1, sink: 0.05, spent: false });
+  g.myDive = false; g.wind = { dir: 0, strength: 0 };
+  const sub = g.slots[0].ship, surf = g.slots[1].ship;
+  sub.dive = 0; sub.health = sub.maxHealth; surf.health = surf.maxHealth;
+  sub.x = 400; sub.y = 360; surf.x = 1050; surf.y = 600; // surface ship well clear
+  window.__hp = { sub: sub.maxHealth, tubes: surf.dcReload.length, guns: surf.guns };
+  g.depthCharges.push({ x: 400, y: 360, ownerId: 1, sink: 0.04, spent: false });
 });
 const meta = await subPage.evaluate(() => window.__hp);
 if (meta.tubes !== meta.guns) throw new Error(`depth-charge tubes ${meta.tubes} != cannons ${meta.guns}`);
 await subPage.waitForFunction(() => window.__game.depthCharges.length === 0 && window.__game.slots[0].ship.health < window.__hp.sub, null, { timeout: 3000, polling: 50 });
-const dcResult = await subPage.evaluate(() => ({
-  subDmg: window.__hp.sub - window.__game.slots[0].ship.health,
-  surfDmg: window.__hp.surf - window.__game.slots[1].ship.health,
-}));
-if (dcResult.subDmg <= 0 || dcResult.surfDmg !== 0) throw new Error(`depth charge wrong: ${JSON.stringify(dcResult)}`);
-console.log('depth charges = cannon count; hit a surfaced sub, spare surface boats ✓');
+const subDmg = await subPage.evaluate(() => window.__hp.sub - window.__game.slots[0].ship.health);
+if (subDmg < 2) throw new Error(`sub took ${subDmg}, expected the full depth-charge hit`);
+pass(`depth charges (= cannon count) hit a surfaced sub hard (${subDmg} dmg)`);
+
+// A close surface ship takes a lighter graze from the shockwave (not nothing).
+await subPage.evaluate(() => {
+  const g = window.__game;
+  const sub = g.slots[0].ship, surf = g.slots[1].ship;
+  surf.health = surf.maxHealth; surf.x = 400; surf.y = 360;
+  sub.x = 1050; sub.y = 600; // sub clear of this one
+  window.__sHp = surf.maxHealth;
+  g.depthCharges.push({ x: 400, y: 360, ownerId: 0, sink: 0.04, spent: false });
+});
+await subPage.waitForFunction(() => window.__game.depthCharges.length === 0, null, { timeout: 3000, polling: 50 });
+const surfDmg = await subPage.evaluate(() => window.__sHp - window.__game.slots[1].ship.health);
+if (surfDmg !== 1) throw new Error(`close surface ship took ${surfDmg}, expected a 1-dmg graze`);
+pass(`a close surface ship takes a lighter graze (${surfDmg} dmg)`);
 
 // Submerged, it glides under an iceberg unharmed but still sinks on an island.
 await subPage.evaluate(() => {
@@ -887,7 +919,7 @@ await subPage.evaluate(() => {
   const s = g.slots[0].ship; s.x = 300; s.y = 300;
 });
 await subPage.waitForFunction(() => !window.__game.slots[0].ship.alive, null, { timeout: 3000 });
-console.log('submerged sub passes under icebergs but sinks on islands ✓');
+pass('submerged sub passes under icebergs but sinks on islands');
 
 // Surface the sub (set state directly — no KeyE, which would just toggle it
 // back down) and confirm it now fires a SURFACE torpedo, not an underwater one.
@@ -904,7 +936,7 @@ await pressUntil(subPage, 'Space', () => window.__game.torpedoes.length > 0, 'a 
 if (await subPage.evaluate(() => window.__game.torpedoes[0].underwater)) {
   throw new Error('surfaced sub fired an underwater torpedo');
 }
-console.log('surfaced sub fires surface torpedoes ✓');
+pass('surfaced sub fires surface torpedoes');
 
 // Surfaced with the engine cut, the sub drifts on the wind; submerged it holds still.
 await subPage.evaluate(() => {
@@ -923,7 +955,7 @@ await subPage.evaluate(() => { const s = window.__game.slots[0].ship; s.dive = 1
 await subPage.waitForTimeout(700);
 const subDrift = await subPage.evaluate(() => Math.abs(window.__game.slots[0].ship.x - window.__sx));
 if (subDrift > 4) throw new Error(`submerged engine-off sub drifted: ${Math.round(subDrift)}`);
-console.log('sub drifts surfaced with engine off, holds still submerged ✓');
+pass('sub drifts surfaced with engine off, holds still submerged');
 await subPage.close();
 
 });
@@ -954,15 +986,19 @@ await careerPage.waitForFunction(() => window.__game.phase === 'battle', null, {
 await careerPage.evaluate(() => { window.__game.slots[0].score = 1; });
 const liveTotal = await careerPage.evaluate(() => (window.__game.careerScore.get(0) ?? 0) + window.__game.slots[0].score);
 if (liveTotal !== 3) throw new Error(`career total wrong mid-round: got ${liveTotal}, expected 3`);
-console.log('scoreboard accumulates career score across rematches ✓');
+pass('scoreboard accumulates career score across rematches');
 await careerPage.close();
 });
 
-  try { fs.unlinkSync(CKPT); } catch {} // full pass — start fresh next time
+  if (!ONLY) { try { fs.unlinkSync(CKPT); } catch {} } // full pass — start fresh next time
+  const secs = ((Date.now() - RUN_START) / 1000).toFixed(0);
+  console.log(`\n${col('1;32', `✓✓✓  ALL ${total} CHECKS PASSED · ${secs}s  ✓✓✓`)}`);
   console.log('done');
 } catch (e) {
-  console.log('FAILED:', e && e.message ? e.message : e);
-  console.log('(re-run to resume from the failed phase; set E2E_RESET=1 to start over)');
+  const secs = ((Date.now() - RUN_START) / 1000).toFixed(0);
+  console.log(`\n${col('1;31', `✗  FAILED after ${total} checks (${secs}s):`)} ${e && e.message ? e.message : e}`);
+  console.log('   re-run to resume from the failed phase · E2E_RESET=1 to start over');
+  console.log('FAILED');
   process.exitCode = 1;
 } finally {
   await browser.close().catch(() => {});

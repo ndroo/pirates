@@ -49,6 +49,20 @@ function showScreen(id: string | null) {
 multiBtn.addEventListener('click', () => showScreen('screen-multi'));
 backBtn.addEventListener('click', () => showScreen('screen-home'));
 
+// Game guide modal — opened from the tagline link or the lobby button.
+const guideModal = document.getElementById('guide-modal') as HTMLDivElement;
+const openGuide = () => (guideModal.hidden = false);
+const closeGuide = () => (guideModal.hidden = true);
+document.getElementById('guide-btn')!.addEventListener('click', openGuide);
+document.getElementById('guide-link')!.addEventListener('click', openGuide);
+document.getElementById('guide-close')!.addEventListener('click', closeGuide);
+guideModal.addEventListener('click', (e) => {
+  if (e.target === guideModal) closeGuide(); // click the backdrop to dismiss
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !guideModal.hidden) closeGuide();
+});
+
 // Remember the player's name across visits, and the host's room across
 // refreshes (sessionStorage = this tab only), so a host reload doesn't
 // strand the guests: the room comes back under the same code.

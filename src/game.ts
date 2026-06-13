@@ -64,8 +64,10 @@ const TORPEDO_DAMAGE = 2;
 const PING_INTERVAL = 4; // s between sonar sweeps that reveal submerged subs
 
 const DC_SINK = 1.3; // s a depth charge sinks before it detonates
-const DC_RADIUS = 85; // px — a wide underwater blast
-const DC_DAMAGE = 2; // hits to a submerged sub caught in it
+const DC_RADIUS = 85; // px — a wide underwater blast that catches submarines
+const DC_DAMAGE = 2; // hits to a submarine caught in it
+const DC_SURFACE_RADIUS = 48; // px — the shockwave reaches the surface only this close
+const DC_SURFACE_DAMAGE = 1; // a surface hull is less exposed than a submerged sub
 const DC_COOLDOWN = 5; // s between depth-charge drops
 
 /** A depth charge sinking toward its underwater detonation. */
@@ -1417,11 +1419,18 @@ export class Game {
       if (this.over) continue;
       for (const slot of this.slots) {
         const ship = slot.ship;
-        // Depth charges hammer any submarine in the blast — surfaced or not —
-        // but never harm a surface boat.
-        if (!ship?.alive || ship.type !== 'sub' || slot.id === dc.ownerId) continue;
-        if (Math.hypot(ship.x - dc.x, ship.y - dc.y) < DC_RADIUS + ship.width / 2) {
-          for (let i = 0; i < DC_DAMAGE; i++) ship.takeHit();
+        if (!ship?.alive || slot.id === dc.ownerId) continue;
+        const d = Math.hypot(ship.x - dc.x, ship.y - dc.y);
+        // Submarines (any depth) take the full hit across the wide blast; a
+        // surface hull only feels the shockwave up close, and less of it.
+        let dmg = 0;
+        if (ship.type === 'sub') {
+          if (d < DC_RADIUS + ship.width / 2) dmg = DC_DAMAGE;
+        } else if (d < DC_SURFACE_RADIUS + ship.width / 2) {
+          dmg = DC_SURFACE_DAMAGE;
+        }
+        if (dmg > 0) {
+          for (let i = 0; i < dmg; i++) ship.takeHit();
           if (!ship.alive) {
             const owner = this.slots.find((s) => s.id === dc.ownerId);
             if (owner) owner.score++;

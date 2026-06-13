@@ -27,6 +27,10 @@
     <div id="lobby">
       <div id="lobby-panel">
         <h1>Pirates: Naval Combat</h1>
+        <p class="tagline">
+          Top-down naval combat. You only steer — bring your broadside to bear and sink the rest.
+          <button id="guide-link" type="button">Game guide →</button>
+        </p>
 
         <div class="screen" id="screen-home">
           <button id="solo-btn">Single player</button>
@@ -76,8 +80,119 @@
         </div>
 
         <p id="lobby-status"></p>
+        <button id="guide-btn" class="subtle">📖 How to play &amp; full game guide</button>
       </div>
     </div>
+
+    <div id="guide-modal" hidden>
+      <div id="guide-card">
+        <button id="guide-close" aria-label="Close">✕</button>
+        <h1>Pirates: Naval Combat — Game Guide</h1>
+
+        <section>
+          <h2>How it works</h2>
+          <p>
+            Your ship is always under way — you don't control the throttle, you <strong>steer</strong>
+            (<kbd>←</kbd>/<kbd>→</kbd> or <kbd>A</kbd>/<kbd>D</kbd>). Cannons fire a <strong>broadside</strong>
+            from whichever side of your hull faces the enemy and the balls fly <em>perpendicular to your
+            heading</em> — so you maneuver to bring your guns to bear. <strong>Last ship afloat wins</strong>
+            (or first to a set number of sinks in Respawn mode).
+          </p>
+        </section>
+
+        <section>
+          <h2>Ships — press <kbd>1</kbd>–<kbd>4</kbd> (or tap a card)</h2>
+          <table>
+            <tr><th>Ship</th><th>Speed</th><th>Guns</th><th>Hits to sink</th><th>Role</th></tr>
+            <tr><td>Small</td><td>fast, tight turns</td><td>2</td><td>3</td><td>Hit-and-run harasser</td></tr>
+            <tr><td>Medium</td><td>steady</td><td>3</td><td>5</td><td>All-rounder</td></tr>
+            <tr><td>Large</td><td>slow, sluggish</td><td>4</td><td>8</td><td>Floating fortress</td></tr>
+            <tr><td>Submarine</td><td>engine (ignores wind)</td><td>2 torpedoes</td><td>4</td><td>Stealth ambusher</td></tr>
+          </table>
+        </section>
+
+        <section>
+          <h2>Weapons</h2>
+          <ul>
+            <li><strong>Cannons</strong> — <kbd>Space</kbd>. Auto-aim at the nearest enemy's side. Toggle
+              <kbd>F</kbd> between a full <em>broadside volley</em> and <em>rolling fire</em> (one gun per press,
+              each reloading independently).</li>
+            <li><strong>Barrel mines</strong> — <kbd>S</kbd>. Drop off the stern; they arm instantly and drift on
+              the wind. One afloat at a time, ~10s recharge. Most blow on contact or a 10–20s fuse; ~25% are duds.
+              A cannonball detonates one harmlessly.</li>
+            <li><strong>Depth charges</strong> — <kbd>Q</kbd>. You carry as many as you have cannons. They sink
+              for a moment then burst underwater: they <em>devastate submarines</em> at any depth in a wide
+              radius, and the shockwave gives a <em>lighter graze</em> to surface ships caught close.</li>
+            <li><strong>Torpedoes</strong> — submarines only, <kbd>Space</kbd>. Run straight off the bow. Fired on
+              the surface they strike surface ships; fired submerged they only strike other submerged subs.</li>
+            <li><strong>Ramming</strong> — bury your bow in another hull to take half their max health (you take none).</li>
+          </ul>
+        </section>
+
+        <section>
+          <h2>The submarine</h2>
+          <p>
+            Dive and surface with <kbd>E</kbd> (3 seconds each). <strong>Submerged</strong>, it's invisible to
+            surface players, can't be shot, rammed, mined or depth-charged through the hull, glides
+            <em>under icebergs</em>, and leaves no wake — but it can only torpedo <em>other submerged subs</em>,
+            and it still wrecks on islands and piers (they reach the seabed). Surface to attack surface ships.
+            Its <kbd>W</kbd> key toggles the <strong>engine</strong> instead of sails: cut the engine on the
+            surface and it drifts with the wind; cut it submerged and it hangs dead still.
+          </p>
+          <p>
+            Surface ships hunt subs with a <strong>sonar sweep</strong> that pings every few seconds and reveals a
+            fading contact on any submerged sub, plus <strong>depth charges</strong>.
+          </p>
+        </section>
+
+        <section>
+          <h2>Seas &amp; hazards</h2>
+          <ul>
+            <li><strong>Wind</strong> — each round rolls a direction and strength (shown by the top dial). Sailing
+              downwind is faster, into the wind slower; across it (broadside-on) is unaffected. Subs ignore wind.</li>
+            <li><strong>Islands</strong> — solid land: hit one and you sink. Cannon fire leaves scorch craters but
+              never sinks them. Some are settled, with huts and a lighthouse, and a wooden <strong>pier</strong>
+              that's solid (clip it and you go down) but can be blown apart by cannon fire.</li>
+            <li><strong>Icebergs</strong> (some rounds) — only a small tip shows; the dangerous bulk underwater is
+              far larger, so you strike them before they look close. A scrape costs ~40% of your health. They're
+              destructible by gunfire or impact. Penguins waddle about on them.</li>
+            <li><strong>Clouds</strong> — drift across the battlefield, each a different random opacity; some are
+              solid banks you can duck behind.</li>
+          </ul>
+        </section>
+
+        <section>
+          <h2>Multiplayer</h2>
+          <p>
+            <strong>Host a game</strong>, pick a player cap (2–16) and a mode, then share the auto-copied invite
+            link. Players can even <strong>join mid-round</strong>. It's peer-to-peer over WebRTC — no server.
+            The host can <strong>pause</strong> (<kbd>P</kbd>), change the rules mid-battle, and kick players.
+            The <strong>scoreboard</strong> (<kbd>Tab</kbd>, or 🏆 on mobile) ranks everyone by a career sink
+            count that carries across rematches. Press <kbd>Enter</kbd> to chat.
+          </p>
+        </section>
+
+        <section>
+          <h2>Controls</h2>
+          <table>
+            <tr><th>Key</th><th>Action</th></tr>
+            <tr><td><kbd>←</kbd>/<kbd>→</kbd>, <kbd>A</kbd>/<kbd>D</kbd></td><td>Steer</td></tr>
+            <tr><td><kbd>Space</kbd></td><td>Fire cannons / torpedoes</td></tr>
+            <tr><td><kbd>F</kbd></td><td>Fire mode: broadside ↔ single guns</td></tr>
+            <tr><td><kbd>W</kbd></td><td>Sails up/down — or, on a sub, engine on/off</td></tr>
+            <tr><td><kbd>E</kbd></td><td>Submarine: dive / surface</td></tr>
+            <tr><td><kbd>S</kbd>/<kbd>↓</kbd></td><td>Drop a barrel mine</td></tr>
+            <tr><td><kbd>Q</kbd></td><td>Drop a depth charge</td></tr>
+            <tr><td><kbd>Tab</kbd> (hold)</td><td>Scoreboard</td></tr>
+            <tr><td><kbd>Enter</kbd></td><td>Chat (multiplayer)</td></tr>
+            <tr><td><kbd>P</kbd></td><td>Pause / resume (host)</td></tr>
+            <tr><td><kbd>R</kbd></td><td>Rematch after a battle ends</td></tr>
+          </table>
+          <p class="muted">On phones, on-screen buttons cover all of the above; choose ships and rematch by tapping.</p>
+        </section>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -72,7 +72,7 @@ export type NetMessage =
   | {
       t: 'state';
       ships: ShipSnap[];
-      balls: { x: number; y: number }[];
+      balls: { x: number; y: number; p: number }[]; // p = arc progress, for the flight visual
       boom: { x: number; y: number }[]; // explosions spawned since the last state
     }
   // guest → host

@@ -100,7 +100,7 @@ export class Game {
   private lastTime = 0;
 
   // Multiplayer state.
-  private remoteBalls: { x: number; y: number }[] = []; // guest: balls from snapshots
+  private remoteBalls: { x: number; y: number; p: number }[] = []; // guest: balls from snapshots
   private pendingBoom: { x: number; y: number }[] = []; // host: explosions to send
   private readyInfo: { ready: number; total: number } | null = null; // guest: select progress
   private disconnected = false;
@@ -676,7 +676,7 @@ export class Game {
           sink: s.ship!.sinkProgress,
           score: s.score,
         })),
-        balls: this.cannonballs.map((b) => ({ x: b.x, y: b.y })),
+        balls: this.cannonballs.map((b) => ({ x: b.x, y: b.y, p: b.p })),
         boom: this.pendingBoom,
       });
       this.pendingBoom = [];
@@ -747,7 +747,7 @@ export class Game {
       const ctx = this.ctx;
       this.drawIslands();
       if (this.mode.kind === 'guest') {
-        for (const ball of this.remoteBalls) drawCannonball(ctx, ball.x, ball.y);
+        for (const ball of this.remoteBalls) drawCannonball(ctx, ball.x, ball.y, ball.p);
       } else {
         for (const ball of this.cannonballs) ball.draw(ctx);
       }

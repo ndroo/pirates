@@ -24,6 +24,21 @@ async function hold(page, key, ms = 150) {
   await page.keyboard.up(key);
 }
 
+// Throttled background pages can run animation frames rarely enough that a
+// single timed hold falls between frames — press until the game reacts.
+async function pressUntil(page, key, predicate, what) {
+  for (let i = 0; i < 8; i++) {
+    await hold(page, key, 250);
+    try {
+      await page.waitForFunction(predicate, null, { timeout: 1500, polling: 100 });
+      return;
+    } catch {
+      // not registered yet — press again
+    }
+  }
+  throw new Error(`pressing ${key} never achieved: ${what}`);
+}
+
 // Open an invite link and join, entering a name first when given one.
 // (With a previously saved name the page auto-joins and skips the screen.)
 async function joinVia(page, link, name) {
@@ -160,20 +175,18 @@ await host2.evaluate(() => {
   g.cannonballs.length = 0;
   g.splashes.length = 0;
 });
-await hold(host2, 'KeyF');
-await host2.waitForFunction(() => window.__game.myFireMode === 'rolling', null, { timeout: 3000 });
-await hold(host2, 'Space', 80);
+await host2.bringToFront();
+await pressUntil(host2, 'KeyF', () => window.__game.myFireMode === 'rolling', 'rolling mode');
+await pressUntil(host2, 'Space', () => window.__game.cannonballs.length > 0, 'a rolling shot');
 const ballCount = await host2.evaluate(() => window.__game.cannonballs.length);
 if (ballCount !== 1) throw new Error(`rolling fire launched ${ballCount} balls from one press`);
 console.log('rolling fire: one gun per press ✓');
 await host2.waitForFunction(() => window.__game.splashes.length > 0, null, { timeout: 5000 });
 console.log('cannonball splashed into the sea ✓');
-await hold(host2, 'KeyF'); // back to broadsides
-await host2.waitForFunction(() => window.__game.myFireMode === 'volley', null, { timeout: 3000 });
+await pressUntil(host2, 'KeyF', () => window.__game.myFireMode === 'volley', 'volley mode');
 
 // --- Barrel mines: one afloat at a time, 10s recharge, 2 damage. ---
-await hold(host2, 'KeyS');
-await host2.waitForFunction(() => window.__game.mines.length === 1, null, { timeout: 3000 });
+await pressUntil(host2, 'KeyS', () => window.__game.mines.length === 1, 'a dropped barrel');
 const mineCool = await host2.evaluate(() => window.__game.slots[0].mineCool);
 if (mineCool < 8) throw new Error(`mine recharge not engaged (${mineCool})`);
 await hold(host2, 'KeyS');

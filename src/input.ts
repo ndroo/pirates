@@ -7,8 +7,8 @@ export class Input {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
       this.down.add(e.code);
-      // Keep Space/arrows from scrolling the page.
-      if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+      // Keep Space/arrows from scrolling and Tab from moving focus.
+      if (e.code === 'Space' || e.code === 'Tab' || e.code.startsWith('Arrow')) e.preventDefault();
     });
     window.addEventListener('keyup', (e) => this.down.delete(e.code));
     window.addEventListener('blur', () => this.down.clear());

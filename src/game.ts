@@ -48,6 +48,9 @@ const ICEBERG_TIP_FRAC = 0.5; // fraction of r that a cannonball must hit to chi
 const ICEBERG_IMPACT_DMG = 2; // hp a ramming ship knocks off the berg
 
 const ISLAND_MAX_CRATERS = 14; // cap so a long siege doesn't grow the scar list forever
+const PIER_HP = 3; // cannonball hits to blow a jetty apart
+
+const FIRE_MODE_KEY = 'pirates-fire-mode'; // remembers volley vs rolling across games
 
 const AUTO_PICK_AFTER = 10; // s on a rematch select before your last ship is reused
 
@@ -104,6 +107,15 @@ interface Wave {
 
 // Phones get touch controls and tap-flavored hint text.
 const TOUCH = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
+
+/** The player's last-used fire mode, remembered across games. */
+function loadFireMode(): FireMode {
+  try {
+    return localStorage.getItem(FIRE_MODE_KEY) === 'rolling' ? 'rolling' : 'volley';
+  } catch {
+    return 'volley';
+  }
+}
 
 /** Cheap deterministic pseudo-random in [0, 1) — stable per (seed, n). */
 function jitter(seed: number, n: number): number {
@@ -243,6 +255,7 @@ export class Game {
   private icebergs: Iceberg[] = [];
   private remoteIcebergs: Iceberg[] = []; // guest: icebergs from snapshots
   private pendingCraters: { i: number; x: number; y: number }[] = []; // host: new island scars to send
+  private pendingPierDown: number[] = []; // host: islands whose pier blew apart this tick
   private clouds: Cloud[] = [];
   private paused = false; // host froze the battle
   private mines: Mine[] = [];
@@ -250,7 +263,7 @@ export class Game {
   private splashes: Splash[] = [];
   private pendingSplash: { x: number; y: number }[] = []; // host: splashes to send
   private chats: ChatLine[] = []; // recent banter, for the feed and bubbles
-  private myFireMode: FireMode = 'volley';
+  private myFireMode: FireMode = loadFireMode();
   private prevKeyF = false; // edge detection for the fire-mode toggle
   private myFurled = false; // this player's sails-down toggle
   private prevKeyW = false; // edge detection for the sail toggle
@@ -268,6 +281,7 @@ export class Game {
   private disconnected = false;
   private kicked = false;
   private tapRestart = false; // tap-on-game-over stands in for the R key
+  private boardToggle = false; // mobile scoreboard button held open
 
   constructor(ctx: CanvasRenderingContext2D, input: Input, mode: GameMode = { kind: 'solo' }) {
     this.ctx = ctx;
@@ -436,6 +450,11 @@ export class Game {
   /** Swap between full broadsides and one-gun-per-press (F key / mode button). */
   toggleFireMode() {
     this.myFireMode = this.myFireMode === 'volley' ? 'rolling' : 'volley';
+    try {
+      localStorage.setItem(FIRE_MODE_KEY, this.myFireMode); // remembered next game
+    } catch {
+      // private mode / storage disabled — fine, just won't persist
+    }
     const self = this.selfSlot;
     if (self) self.fireMode = this.myFireMode;
   }
@@ -444,6 +463,12 @@ export class Game {
   toggleSails(): boolean {
     if (this.phase === 'battle') this.myFurled = !this.myFurled;
     return this.myFurled;
+  }
+
+  /** Show/hide the scoreboard (mobile 🏆 button; desktop holds Tab instead). */
+  toggleBoard(): boolean {
+    this.boardToggle = !this.boardToggle;
+    return this.boardToggle;
   }
 
   /** Send banter to the crew (called by the chat bar in main.ts). */
@@ -563,6 +588,10 @@ export class Game {
           const isl = this.islands[c.i];
           if (isl) (isl.craters ??= []).push({ x: c.x, y: c.y });
         }
+        for (const i of msg.piersDown) {
+          const isl = this.islands[i];
+          if (isl) isl.pier = undefined;
+        }
         for (const b of msg.boom) this.explosions.push(new Explosion(b.x, b.y));
         for (const s of msg.splash) this.splashes.push(new Splash(s.x, s.y));
         break;
@@ -624,6 +653,7 @@ export class Game {
     this.icebergs = [];
     this.remoteIcebergs = [];
     this.pendingCraters = [];
+    this.pendingPierDown = [];
     this.clouds = [];
     this.wakes.clear();
     this.paused = false;
@@ -660,7 +690,8 @@ export class Game {
    * open water; everything else — the middle and the outer reaches — is
    * fair game, with sailing channels kept between islands.
    */
-  private makeIslands(): Island[] {
+  /** Sample points around the fleet's spawn ring, to keep hazards off it. */
+  private spawnRing(): { x: number; y: number }[] {
     const ring: { x: number; y: number }[] = [];
     for (let i = 0; i < 48; i++) {
       const a = (i / 48) * Math.PI * 2;
@@ -669,17 +700,25 @@ export class Game {
         y: WORLD_H / 2 + Math.sin(a) * WORLD_H * 0.32,
       });
     }
+    return ring;
+  }
+
+  private makeIslands(): Island[] {
+    const ring = this.spawnRing();
+    // Piers can trap the AI, so solo (vs-AI) maps simply go without them.
+    const allowPiers = this.mode.kind !== 'solo';
 
     const islands: Island[] = [];
     const count = MIN_ISLANDS + Math.floor(Math.random() * (MAX_ISLANDS - MIN_ISLANDS + 1));
     for (let tries = 0; islands.length < count && tries < 400; tries++) {
       const r = 35 + Math.random() * 40;
+      const hasPier = allowPiers && Math.random() < 0.45;
       const candidate: Island = {
         x: r + 20 + Math.random() * (WORLD_W - 2 * r - 40),
         y: r + 20 + Math.random() * (WORLD_H - 2 * r - 40),
         r,
-        // Roughly 45% of islands sport a wooden pier at a random bearing.
-        pier: Math.random() < 0.45 ? Math.random() * Math.PI * 2 : undefined,
+        pier: hasPier ? Math.random() * Math.PI * 2 : undefined,
+        pierHp: hasPier ? PIER_HP : undefined,
       };
       if (ring.some((p) => Math.hypot(p.x - candidate.x, p.y - candidate.y) < r + 55)) continue;
       if (islands.some((i) => Math.hypot(i.x - candidate.x, i.y - candidate.y) < i.r + r + 100)) continue;
@@ -695,6 +734,7 @@ export class Game {
    */
   private makeIcebergs(): Iceberg[] {
     if (Math.random() > ICEBERG_CHANCE) return [];
+    const ring = this.spawnRing();
     const bergs: Iceberg[] = [];
     const count = 1 + Math.floor(Math.random() * 3); // 1–3
     for (let tries = 0; bergs.length < count && tries < 200; tries++) {
@@ -707,11 +747,9 @@ export class Game {
         hp,
         maxHp: hp,
       };
-      const cx = WORLD_W / 2;
-      const cy = WORLD_H / 2;
-      // Keep them off the spawn ring (within ~0.32 of the arena half-extents).
-      const ringDist = Math.hypot((candidate.x - cx) / (WORLD_W * 0.32), (candidate.y - cy) / (WORLD_H * 0.32));
-      if (Math.abs(ringDist - 1) < 0.18) continue;
+      // Keep clear of the spawn ring — the danger radius, not just the tip —
+      // so nobody starts the round already inside an iceberg.
+      if (ring.some((p) => Math.hypot(p.x - candidate.x, p.y - candidate.y) < r + 55)) continue;
       if (this.islands.some((i) => Math.hypot(i.x - candidate.x, i.y - candidate.y) < i.r + r + 40)) continue;
       if (bergs.some((b) => Math.hypot(b.x - candidate.x, b.y - candidate.y) < b.r + r + 60)) continue;
       bergs.push(candidate);
@@ -807,29 +845,31 @@ export class Game {
     }
   }
 
-  /** Every battle opens in broadside (the realistic default) with sails set;
-   * keep the self slot's state in lockstep with the HUD so they never disagree. */
+  /** Every battle opens with sails set and your remembered fire mode; keep the
+   * self slot's state in lockstep with the HUD so they never disagree. */
   private enterBattleFireMode() {
-    this.myFireMode = 'volley';
     this.myFurled = false;
     const self = this.selfSlot;
-    if (self) self.fireMode = 'volley';
+    if (self) self.fireMode = this.myFireMode;
   }
 
   /**
-   * How far the ship can sail holding `turn` before grounding on an island,
-   * simulated with its real speed and turn rate. Infinity = clear horizon.
+   * Distance (px) the ship can sail holding `turn` before grounding, simulated
+   * along its real turning arc. Lookahead is a fixed *distance* (not time) so a
+   * slow, sluggish hull still spots a big island in time to arc clear — every
+   * hull's turning radius is similar, so they need similar room. Infinity =
+   * clear horizon.
    */
-  private pathClearance(ship: Ship, turn: Turn, horizon = 2.4): number {
-    const step = 0.12;
-    // Assume the worst-case tailwind throughout so the dodge is never
-    // started later than the real (wind-boosted) ship would need.
+  private pathClearance(ship: Ship, turn: Turn, look = 230): number {
+    // Assume the worst-case tailwind throughout so the dodge is never started
+    // later than the real (wind-boosted) ship would need.
     const speed = ship.speed * (1 + this.wind.strength);
+    const step = 0.1;
     let x = ship.x;
     let y = ship.y;
     let h = ship.heading;
     let traveled = 0;
-    for (let t = 0; t < horizon; t += step) {
+    while (traveled < look) {
       h += turn * ship.turnRate * step;
       x += Math.cos(h) * speed * step;
       y += Math.sin(h) * speed * step;
@@ -856,25 +896,29 @@ export class Game {
    */
   private aiTurn(slot: Slot, ship: Ship, target: Ship | null): Turn {
     const chase: Turn = !this.over && target ? decideTurn(ship, target) : 0;
-    const candidates: Turn[] = [chase];
-    if (slot.avoid !== 0 && !candidates.includes(slot.avoid)) candidates.push(slot.avoid);
-    for (const t of [0, -1, 1] as Turn[]) if (!candidates.includes(t)) candidates.push(t);
 
-    let best = chase;
-    let bestDist = -1;
-    for (const t of candidates) {
-      const d = this.pathClearance(ship, t);
-      if (d === Infinity) {
-        slot.avoid = t === chase ? 0 : t;
-        return t;
-      }
-      if (d > bestDist) {
-        bestDist = d;
-        best = t;
+    // Mid-dodge: hold the committed turn until sailing *straight ahead* is
+    // clear, not merely until the curved chase reads clear — otherwise the
+    // chase keeps grazing the obstacle and the ship dithers onto it.
+    if (slot.avoid !== 0) {
+      if (this.pathClearance(ship, 0) === Infinity) {
+        slot.avoid = 0; // safely past — resume normal steering
+      } else {
+        const other: Turn = slot.avoid === 1 ? -1 : 1;
+        // Swap sides only if the committed side is closing out and the other is open.
+        if (this.pathClearance(ship, slot.avoid) < 70 && this.pathClearance(ship, other) === Infinity) {
+          slot.avoid = other;
+        }
+        return slot.avoid;
       }
     }
-    slot.avoid = best === chase ? 0 : best;
-    return best;
+
+    // Free to chase if that arc is clear; otherwise commit to the better dodge.
+    if (this.pathClearance(ship, chase) === Infinity) return chase;
+    const left = this.pathClearance(ship, -1);
+    const right = this.pathClearance(ship, 1);
+    slot.avoid = right >= left ? 1 : -1;
+    return slot.avoid;
   }
 
   // Pier geometry, shared by drawing, collision, and AI avoidance.
@@ -1113,6 +1157,17 @@ export class Game {
         }
       }
       if (ball.spent) continue;
+      // A jetty out over the water is shootable; enough hits blow it apart.
+      for (let bi = 0; bi < this.islands.length; bi++) {
+        const isl = this.islands[bi];
+        if (isl.pier == null) continue;
+        if (this.pierDist(ball.x, ball.y, isl) < Game.PIER_HALF_W + 3) {
+          ball.spent = true;
+          this.damagePier(bi, ball.x, ball.y);
+          break;
+        }
+      }
+      if (ball.spent) continue;
       for (let bi = 0; bi < this.islands.length; bi++) {
         const isl = this.islands[bi];
         if (Math.hypot(ball.x - isl.x, ball.y - isl.y) < isl.r) {
@@ -1166,12 +1221,14 @@ export class Game {
         mines: this.mineSnaps(),
         icebergs: this.icebergs,
         craters: this.pendingCraters,
+        piersDown: this.pendingPierDown,
         boom: this.pendingBoom,
         splash: this.pendingSplash,
       });
       this.pendingBoom = [];
       this.pendingSplash = [];
       this.pendingCraters = [];
+      this.pendingPierDown = [];
     }
   }
 
@@ -1280,6 +1337,26 @@ export class Game {
     }
   }
 
+  /** Pound an island's pier; blow it apart (and free the lane) when it's spent. */
+  private damagePier(i: number, x: number, y: number) {
+    const isl = this.islands[i];
+    isl.pierHp = (isl.pierHp ?? PIER_HP) - 1;
+    this.explosions.push(new Explosion(x, y));
+    this.pendingBoom.push({ x, y });
+    if (isl.pierHp <= 0) {
+      isl.pier = undefined; // no longer solid, no longer drawn
+      isl.pierHp = undefined;
+      this.pendingPierDown.push(i);
+      // splintered planks fly
+      for (let k = 0; k < 3; k++) {
+        const ex = x + (Math.random() - 0.5) * 26;
+        const ey = y + (Math.random() - 0.5) * 26;
+        this.explosions.push(new Explosion(ex, ey));
+        this.pendingBoom.push({ x: ex, y: ey });
+      }
+    }
+  }
+
   /** Record a cannonball scar on an island (cosmetic; islands never sink). */
   private addCrater(i: number, x: number, y: number) {
     const isl = this.islands[i];
@@ -1356,8 +1433,8 @@ export class Game {
       const ctx = this.ctx;
       const now = performance.now();
       this.drawIslands();
-      this.drawPenguins(now);
       this.drawIcebergs();
+      this.drawPenguins(now);
       this.recordWakes(now);
       this.drawWakes(now);
       this.drawMines();
@@ -1382,9 +1459,10 @@ export class Game {
 
       this.drawWind();
       this.drawWeaponBars();
-      this.drawChatHint();
+      this.drawHints();
       this.drawRespawnNotice();
-      if (this.over) this.drawGameOver();
+      if (this.over) this.drawScoreboard(true);
+      else if (this.input.isDown('Tab') || this.boardToggle) this.drawScoreboard(false);
     }
 
     this.drawChatFeed();
@@ -1702,19 +1780,20 @@ export class Game {
     }
   }
 
-  /** Little tuxedoed locals waddling about each island, milkshakes in flipper. */
+  /** Little tuxedoed locals waddling about each iceberg, milkshakes in flipper. */
   private drawPenguins(now: number) {
     const t = now / 1000;
-    for (const isl of this.islands) {
-      const seed = isl.x * 0.07 + isl.y * 0.05;
-      const count = Math.min(3, 1 + Math.floor(isl.r / 28));
+    const bergs = this.mode.kind === 'guest' ? this.remoteIcebergs : this.icebergs;
+    for (const berg of bergs) {
+      const seed = berg.x * 0.07 + berg.y * 0.05;
+      const count = Math.min(3, 1 + Math.floor(berg.r / 30));
       for (let i = 0; i < count; i++) {
         const phase = jitter(seed, i) * Math.PI * 2;
         const dir = jitter(seed, i + 7) > 0.5 ? 1 : -1;
-        const orbit = isl.r * (0.22 + jitter(seed, i + 3) * 0.26);
+        const orbit = berg.r * (0.1 + jitter(seed, i + 3) * 0.16); // up on the visible ice
         const ang = phase + t * 0.35 * dir;
-        const px = isl.x + Math.cos(ang) * orbit;
-        const py = isl.y + Math.sin(ang) * orbit * 0.85;
+        const px = berg.x + Math.cos(ang) * orbit;
+        const py = berg.y + Math.sin(ang) * orbit * 0.85;
         // Face the way they're walking (tangent's x sign).
         const facing = -Math.sin(ang) * dir >= 0 ? 1 : -1;
         drawPenguin(this.ctx, px, py, facing, t, phase);
@@ -1740,15 +1819,20 @@ export class Game {
     );
   }
 
-  /** A faint nudge so desktop players discover the chat. */
-  private drawChatHint() {
-    if (this.mode.kind === 'solo' || TOUCH || this.over) return;
+  /** Faint bottom-right nudges so desktop players find chat and the scoreboard. */
+  private drawHints() {
+    if (TOUCH || this.over) return;
     const ctx = this.ctx;
     ctx.font = '13px system-ui, sans-serif';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'bottom';
     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    ctx.fillText('Press Enter to chat', WORLD_W - 16, WORLD_H - 14);
+    let y = WORLD_H - 14;
+    if (this.mode.kind !== 'solo') {
+      ctx.fillText('Press Enter to chat', WORLD_W - 16, y);
+      y -= 18;
+    }
+    ctx.fillText('Hold Tab for scores', WORLD_W - 16, y);
   }
 
   private drawShipSelect() {
@@ -2048,34 +2132,78 @@ export class Game {
     ctx.fillText('You sank — respawning…', WORLD_W / 2, WORLD_H / 2);
   }
 
-  private drawGameOver() {
+  /**
+   * The standings panel: everyone ranked by ships sunk. Shown while a player
+   * holds Tab (or the mobile 🏆 button), and as the final results on game over.
+   */
+  private drawScoreboard(final: boolean) {
     const ctx = this.ctx;
-    const w = WORLD_W;
-    const h = WORLD_H;
+    ctx.fillStyle = final ? 'rgba(6, 18, 32, 0.82)' : 'rgba(6, 18, 32, 0.62)';
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
 
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-    ctx.fillRect(0, 0, w, h);
+    const ranked = this.slots
+      .filter((s) => s.ship || s.score > 0 || !s.left)
+      .slice()
+      .sort((a, b) => b.score - a.score || (b.ship?.alive ? 1 : 0) - (a.ship?.alive ? 1 : 0));
 
+    const rowH = 30;
+    const listH = Math.max(ranked.length, 1) * rowH;
+    const top = WORLD_H / 2 - listH / 2;
+
+    // Title.
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff';
-    ctx.font = 'bold 42px system-ui, sans-serif';
-
-    const winner = this.winner;
-    let title: string;
-    if (this.mode.kind === 'solo') {
-      title = winner?.id === this.selfId ? 'Enemy ship destroyed!' : 'Your ship was destroyed!';
-    } else if (!winner) {
-      title = 'All ships sank!';
-    } else if (winner.id === this.selfId) {
-      title = this.battleMode === 'respawn' ? `Victory! First to ${this.target} sinks!` : 'Victory! Last ship afloat!';
-    } else {
-      title = `${this.slotLabel(winner)} wins!`;
+    ctx.font = 'bold 38px system-ui, sans-serif';
+    let title = 'Scoreboard';
+    if (final) {
+      const w = this.winner;
+      if (this.mode.kind === 'solo') title = w?.id === this.selfId ? 'Enemy ship destroyed!' : 'Your ship was destroyed!';
+      else if (!w) title = 'All ships sank!';
+      else if (w.id === this.selfId) title = 'Victory!';
+      else title = `${this.slotLabel(w)} wins!`;
     }
-    ctx.fillText(title, w / 2, h / 2 - 20);
-    ctx.font = '20px system-ui, sans-serif';
-    const again = this.mode.kind === 'solo' ? 'new battle' : 'rematch';
-    ctx.fillText(TOUCH ? `Tap the screen for a ${again}` : `Press R for a ${again}`, w / 2, h / 2 + 24);
+    ctx.fillText(title, WORLD_W / 2, top - 54);
+    if (this.battleMode === 'respawn') {
+      ctx.font = '16px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
+      ctx.fillText(`First to ${this.target} sinks`, WORLD_W / 2, top - 26);
+    }
+
+    // Rows.
+    const left = WORLD_W / 2 - 250;
+    ranked.forEach((slot, i) => {
+      const y = top + i * rowH + rowH / 2;
+      const me = slot.id === this.selfId;
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      ctx.font = me ? 'bold 17px system-ui, sans-serif' : '17px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.fillText(`${i + 1}`, left, y);
+      ctx.fillStyle = slot.color;
+      ctx.fillRect(left + 26, y - 7, 14, 14);
+      ctx.fillStyle = me ? '#ffd75e' : '#fff';
+      ctx.fillText(this.slotLabel(slot), left + 50, y);
+      ctx.font = '14px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.fillText(slot.ship ? slot.ship.type : '—', left + 245, y);
+      ctx.textAlign = 'right';
+      ctx.font = me ? 'bold 17px system-ui, sans-serif' : '17px system-ui, sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(`${slot.score} sunk`, left + 420, y);
+      ctx.textAlign = 'left';
+      ctx.font = '14px system-ui, sans-serif';
+      ctx.fillStyle = slot.ship?.alive ? 'rgba(120, 220, 120, 0.9)' : 'rgba(255, 120, 120, 0.85)';
+      ctx.fillText(slot.ship?.alive ? 'afloat' : 'sunk', left + 442, y);
+    });
+
+    if (final) {
+      ctx.textAlign = 'center';
+      ctx.font = '19px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+      const again = this.mode.kind === 'solo' ? 'new battle' : 'rematch';
+      ctx.fillText(TOUCH ? `Tap the screen for a ${again}` : `Press R for a ${again}`, WORLD_W / 2, top + listH + 36);
+    }
   }
 
   private drawDisconnected() {

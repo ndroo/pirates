@@ -341,6 +341,28 @@ await host2.waitForFunction(
   null, { timeout: 5000 },
 );
 console.log('ramming shatters an iceberg, ship survives ✓');
+
+// --- Cannon fire blows a pier apart, and that frees the lane on the guest. ---
+await host2.evaluate(() => {
+  const g = window.__game;
+  g.icebergs = [];
+  // Pier runs horizontally (+x) across the firing lane, so a broadside gun
+  // crosses it regardless of how the guns straddle the hull's centreline.
+  g.islands = [{ x: 300, y: 460, r: 55, pier: 0, pierHp: 1, craters: [] }];
+  const a = g.slots[0].ship;
+  const b = g.slots[1].ship;
+  a.health = a.maxHealth;
+  a.x = 400; a.y = 300; a.heading = 0;
+  a.gunReload = a.gunReload.map(() => 0);
+  b.x = 400; b.y = 700; // below, so the broadside fires straight down through the pier
+  g.cannonballs.length = 0;
+});
+await host2.keyboard.down('Space');
+await host2.waitForFunction(() => window.__game.islands[0].pier == null, null, { timeout: 9000, polling: 50 });
+await host2.keyboard.up('Space');
+console.log('cannon fire destroys a pier ✓');
+await guest3.waitForFunction(() => window.__game.islands[0]?.pier == null, null, { timeout: 5000, polling: 100 });
+console.log('pier destruction synced to guest ✓');
 await host2.evaluate(() => {
   const g = window.__game;
   g.icebergs = [];
@@ -544,6 +566,35 @@ await solo.click('#solo-btn');
 await solo.waitForSelector('#lobby', { state: 'detached', timeout: 10000 });
 await hold(solo, 'Digit1');
 await solo.waitForFunction(() => window.__game.phase === 'battle', null, { timeout: 10000 });
+
+// Solo (vs-AI) maps carry no piers (the AI can get trapped on them).
+if (await solo.evaluate(() => window.__game.islands.some((i) => i.pier != null))) {
+  throw new Error('a solo map generated a pier');
+}
+console.log('solo maps have no piers ✓');
+
+// Nobody spawns inside an iceberg's danger radius.
+const safeSpawns = await solo.evaluate(() =>
+  window.__game.slots.every((s) =>
+    !s.ship || window.__game.icebergs.every((b) => Math.hypot(s.ship.x - b.x, s.ship.y - b.y) > b.r),
+  ),
+);
+if (!safeSpawns) throw new Error('a ship spawned inside an iceberg');
+console.log('spawns are clear of icebergs ✓');
+
+// Fire mode persists across a rematch (remembered, not reset to broadside).
+await pressUntil(solo, 'KeyF', () => window.__game.myFireMode === 'rolling', 'rolling mode');
+await solo.evaluate(() => { window.__game.slots[1].ship.health = 0; }); // sink the AI → game over
+await solo.waitForFunction(() => window.__game.over, null, { timeout: 4000 });
+await hold(solo, 'KeyR'); // rematch
+await solo.waitForFunction(() => window.__game.phase === 'select', null, { timeout: 4000 });
+await hold(solo, 'Digit2');
+await solo.waitForFunction(() => window.__game.phase === 'battle', null, { timeout: 4000 });
+if (await solo.evaluate(() => window.__game.myFireMode !== 'rolling')) {
+  throw new Error('fire mode was not remembered across the rematch');
+}
+console.log('fire mode persists across games ✓');
+await pressUntil(solo, 'KeyF', () => window.__game.myFireMode === 'volley', 'reset fire mode');
 
 // Isolate island avoidance: clear the round's random icebergs (a double
 // scrape could sink the ship) and piers (a separate hazard, tested above).

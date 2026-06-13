@@ -6,19 +6,22 @@ const browser = await chromium.launch();
 
 let total = 0;
 let groundings = 0;
-for (let round = 0; round < 4; round++) {
+for (let round = 0; round < 6; round++) {
   const page = await (await browser.newContext()).newPage();
   await page.goto(GAME_URL);
   await page.click('#solo-btn');
   await page.waitForSelector('#lobby', { state: 'detached' });
-  await page.keyboard.down('Digit1');
+  // Worst case for turning: a slow, sluggish large hull.
+  await page.keyboard.down('Digit3');
   await page.waitForTimeout(150);
-  await page.keyboard.up('Digit1');
+  await page.keyboard.up('Digit3');
   await page.waitForFunction(() => window.__game.phase === 'battle');
 
   for (let k = 0; k < 8; k++) {
     await page.evaluate((k) => {
       const g = window.__game;
+      g.icebergs = [];
+      for (const isl2 of g.islands) delete isl2.pier;
       const isl = g.islands[k % g.islands.length];
       const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
       // Rotate the approach until the spawn spot is on-map and on open

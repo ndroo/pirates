@@ -103,6 +103,14 @@ canvas {
   font-size: 18px;
 }
 
+#tc-board {
+  right: calc(158px + env(safe-area-inset-right));
+  bottom: calc(124px + env(safe-area-inset-bottom));
+  width: 48px;
+  height: 48px;
+  font-size: 18px;
+}
+
 #tc-chat[hidden] {
   display: none;
 }

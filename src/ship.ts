@@ -19,6 +19,9 @@ export const SHIP_TYPES = {
 export type ShipTypeName = keyof typeof SHIP_TYPES;
 
 const SINK_DURATION = 1.5; // s to fade out after health hits 0
+// With sails furled the ship makes no way of its own and simply drifts; this
+// scales the wind vector (≈±0.4) up to a felt drift speed in px/s.
+const SAIL_DOWN_DRIFT = 130;
 
 const SAIL_FRESH = { r: 243, g: 234, b: 215 }; // #f3ead7
 const SAIL_RAGGED = { r: 169, g: 152, b: 120 }; // dirty, battle-worn canvas
@@ -41,6 +44,7 @@ export class Ship {
   gunReload: number[]; // s until each gun is ready again
   ramSafe = 0; // s of immunity left after being rammed
   bergSafe = 0; // s of immunity left after scraping an iceberg
+  sailsDown = false; // furled — drifting with the wind, no propulsion
   sinkProgress = 0; // 0 afloat → 1 fully sunk
 
   readonly type: ShipTypeName;
@@ -87,23 +91,40 @@ export class Ship {
     return this.gunReload.findIndex((r) => r <= 0);
   }
 
-  update(dt: number, turn: Turn, worldW: number, worldH: number, wind?: { x: number; y: number }) {
+  update(
+    dt: number,
+    turn: Turn,
+    worldW: number,
+    worldH: number,
+    wind?: { x: number; y: number },
+    sailsDown = false,
+  ) {
     for (let i = 0; i < this.gunReload.length; i++) {
       this.gunReload[i] = Math.max(0, this.gunReload[i] - dt);
     }
     this.ramSafe = Math.max(0, this.ramSafe - dt);
     this.bergSafe = Math.max(0, this.bergSafe - dt);
+    this.sailsDown = sailsDown;
 
     if (!this.alive) {
       this.sinkProgress = Math.min(1, this.sinkProgress + dt / SINK_DURATION);
       return;
     }
 
+    // You can still swing the hull to bring a broadside to bear when drifting.
     this.heading += turn * this.turnRate * dt;
-    // Running before the wind is faster, beating into it slower.
-    const windFactor = wind ? 1 + wind.x * Math.cos(this.heading) + wind.y * Math.sin(this.heading) : 1;
-    this.x += Math.cos(this.heading) * this.speed * windFactor * dt;
-    this.y += Math.sin(this.heading) * this.speed * windFactor * dt;
+    if (sailsDown) {
+      // Furled: no headway, just ride the wind.
+      if (wind) {
+        this.x += wind.x * SAIL_DOWN_DRIFT * dt;
+        this.y += wind.y * SAIL_DOWN_DRIFT * dt;
+      }
+    } else {
+      // Running before the wind is faster, beating into it slower.
+      const windFactor = wind ? 1 + wind.x * Math.cos(this.heading) + wind.y * Math.sin(this.heading) : 1;
+      this.x += Math.cos(this.heading) * this.speed * windFactor * dt;
+      this.y += Math.sin(this.heading) * this.speed * windFactor * dt;
+    }
 
     // Wrap around world edges, with margin so the ship fully leaves first.
     const m = this.length;
@@ -184,6 +205,18 @@ export class Ship {
     ctx.fillStyle = `rgb(${mix(SAIL_FRESH.r, SAIL_RAGGED.r)}, ${mix(SAIL_FRESH.g, SAIL_RAGGED.g)}, ${mix(SAIL_FRESH.b, SAIL_RAGGED.b)})`;
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
     [l / 6, -l / 5].forEach((mastX, m) => {
+      if (this.sailsDown) {
+        // Furled: a thin rolled bundle gathered along the yard.
+        ctx.beginPath();
+        ctx.rect(mastX - 3, -2.5, 6, 5);
+        ctx.fill();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(mastX, -w * 0.7);
+        ctx.lineTo(mastX, w * 0.7); // bare yard
+        ctx.stroke();
+        return;
+      }
       const span = w * 1.5 * (1 - damage * 0.35);
       const segs = 6;
       ctx.beginPath();

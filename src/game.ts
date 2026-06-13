@@ -44,8 +44,15 @@ const RAM_SAFE = 1.2; // s of immunity after taking a ram, so one hit ≠ many
 const ICEBERG_CHANCE = 0.5; // odds any given round has icebergs at all
 const ICEBERG_DAMAGE_FRAC = 0.4; // share of max health scraped off on a strike
 const ICEBERG_SAFE = 3; // s of immunity after a scrape, long enough to sail clear
+const ICEBERG_TIP_FRAC = 0.5; // fraction of r that a cannonball must hit to chip ice
+const ICEBERG_IMPACT_DMG = 2; // hp a ramming ship knocks off the berg
+
+const ISLAND_MAX_CRATERS = 14; // cap so a long siege doesn't grow the scar list forever
 
 const AUTO_PICK_AFTER = 10; // s on a rematch select before your last ship is reused
+
+const WAKE_LIFE = 1100; // ms a foam-trail puff lingers before fading out
+const WAKE_GAP = 7; // px the stern must travel before a new puff is laid
 
 /** A floating barrel bomb. Lives until contact, its fuse, or a cannonball. */
 interface Mine {
@@ -104,6 +111,84 @@ function jitter(seed: number, n: number): number {
   return v - Math.floor(v);
 }
 
+/** A tiny waddling penguin sipping a thick milkshake, drawn at its feet (x, y). */
+function drawPenguin(ctx: CanvasRenderingContext2D, x: number, y: number, dir: 1 | -1, t: number, phase: number) {
+  const bob = Math.sin(t * 6 + phase) * 1.1; // waddle bounce
+  const step = Math.sin(t * 8 + phase); // alternating feet
+  const sipping = Math.sin(t * 0.9 + phase) > 0.55; // every so often, a sip
+
+  ctx.save();
+  ctx.translate(x, y + bob);
+
+  // Feet.
+  ctx.fillStyle = '#e6962a';
+  for (const s of [-1, 1]) {
+    const lift = s === Math.sign(step || 1) ? -1 : 0;
+    ctx.beginPath();
+    ctx.ellipse(s * 1.6, lift, 1.7, 1, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Body (black) with white belly.
+  ctx.fillStyle = '#1c1c22';
+  ctx.beginPath();
+  ctx.ellipse(0, -4.6, 3.3, 4.7, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#f3f3ef';
+  ctx.beginPath();
+  ctx.ellipse(dir * 0.4, -4.2, 2, 3.6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Back flipper.
+  ctx.fillStyle = '#1c1c22';
+  ctx.beginPath();
+  ctx.ellipse(-dir * 2.8, -4.4, 1, 2.6, dir * 0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Head.
+  ctx.beginPath();
+  ctx.arc(0, -9.2, 2.7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#f3f3ef'; // face patch
+  ctx.beginPath();
+  ctx.arc(dir * 0.5, -8.9, 1.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#1c1c22'; // eye
+  ctx.beginPath();
+  ctx.arc(dir * 0.9, -9.6, 0.55, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#e6962a'; // beak
+  ctx.beginPath();
+  ctx.moveTo(dir * 1.8, -9.1);
+  ctx.lineTo(dir * 3.6, -8.7);
+  ctx.lineTo(dir * 1.8, -8.2);
+  ctx.closePath();
+  ctx.fill();
+
+  // Milkshake: cup + straw, raised to the beak when sipping.
+  const cupX = dir * (sipping ? 2.6 : 4.2);
+  const cupY = sipping ? -8.4 : -5.4;
+  ctx.fillStyle = '#f7d9e6'; // thick pink shake in a pale cup
+  ctx.beginPath();
+  ctx.moveTo(cupX - 1.4, cupY - 1.8);
+  ctx.lineTo(cupX + 1.4, cupY - 1.8);
+  ctx.lineTo(cupX + 1, cupY + 1.8);
+  ctx.lineTo(cupX - 1, cupY + 1.8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.lineWidth = 0.4;
+  ctx.stroke();
+  ctx.strokeStyle = '#d34b7a'; // straw to the beak
+  ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.moveTo(cupX, cupY - 1.8);
+  ctx.lineTo(dir * 2.2, -9);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
 /** One player (or the solo AI) in the match. */
 interface Slot {
   id: number; // 0 = host; shown by name, or "Player <id + 1>" if unnamed
@@ -112,7 +197,7 @@ interface Slot {
   ai: boolean;
   pick: ShipTypeName | null;
   ship: Ship | null;
-  input: { turn: Turn; fire: boolean; drop: boolean; restart: boolean }; // latest remote keys
+  input: { turn: Turn; fire: boolean; drop: boolean; restart: boolean; sail: boolean }; // latest remote keys
   score: number; // ships sunk (respawn mode)
   mineCool: number; // s until the next barrel is ready
   fireMode: FireMode;
@@ -130,7 +215,7 @@ function newSlot(id: number, name = '', ai = false): Slot {
     ai,
     pick: null,
     ship: null,
-    input: { turn: 0, fire: false, drop: false, restart: false },
+    input: { turn: 0, fire: false, drop: false, restart: false, sail: false },
     score: 0,
     mineCool: 0,
     fireMode: 'volley',
@@ -156,6 +241,8 @@ export class Game {
   private explosions: Explosion[] = [];
   private islands: Island[] = [];
   private icebergs: Iceberg[] = [];
+  private remoteIcebergs: Iceberg[] = []; // guest: icebergs from snapshots
+  private pendingCraters: { i: number; x: number; y: number }[] = []; // host: new island scars to send
   private clouds: Cloud[] = [];
   private paused = false; // host froze the battle
   private mines: Mine[] = [];
@@ -165,6 +252,9 @@ export class Game {
   private chats: ChatLine[] = []; // recent banter, for the feed and bubbles
   private myFireMode: FireMode = 'volley';
   private prevKeyF = false; // edge detection for the fire-mode toggle
+  private myFurled = false; // this player's sails-down toggle
+  private prevKeyW = false; // edge detection for the sail toggle
+  private wakes = new Map<number, { x: number; y: number; born: number }[]>(); // foam trails per slot
   private lastPick: ShipTypeName | null = null; // previous round's ship
   private autoPickAt: number | null = null; // ms epoch when lastPick is auto-used
   private wind: Wind = { dir: 0, strength: 0 };
@@ -325,7 +415,7 @@ export class Game {
       }
       // Picked while the round-over banner is up: they sail next round.
     } else if (msg.t === 'input') {
-      slot.input = { turn: msg.turn, fire: msg.fire, drop: msg.drop, restart: msg.restart };
+      slot.input = { turn: msg.turn, fire: msg.fire, drop: msg.drop, restart: msg.restart, sail: msg.sail };
       slot.fireMode = msg.mode;
     } else if (msg.t === 'chat') {
       const text = cleanChat(msg.text);
@@ -348,6 +438,12 @@ export class Game {
     this.myFireMode = this.myFireMode === 'volley' ? 'rolling' : 'volley';
     const self = this.selfSlot;
     if (self) self.fireMode = this.myFireMode;
+  }
+
+  /** Furl or set the sails (W key / sail button). */
+  toggleSails(): boolean {
+    if (this.phase === 'battle') this.myFurled = !this.myFurled;
+    return this.myFurled;
   }
 
   /** Send banter to the crew (called by the chat bar in main.ts). */
@@ -438,6 +534,7 @@ export class Game {
         });
         this.islands = msg.islands;
         this.icebergs = msg.icebergs;
+        this.remoteIcebergs = msg.icebergs;
         this.clouds = msg.clouds;
         this.wind = msg.wind;
         this.remoteMines = msg.mines;
@@ -461,6 +558,11 @@ export class Game {
         for (const snap of msg.ships) this.applySnap(snap);
         this.remoteBalls = msg.balls;
         this.remoteMines = msg.mines;
+        this.remoteIcebergs = msg.icebergs;
+        for (const c of msg.craters) {
+          const isl = this.islands[c.i];
+          if (isl) (isl.craters ??= []).push({ x: c.x, y: c.y });
+        }
         for (const b of msg.boom) this.explosions.push(new Explosion(b.x, b.y));
         for (const s of msg.splash) this.splashes.push(new Splash(s.x, s.y));
         break;
@@ -479,6 +581,7 @@ export class Game {
     ship.heading = snap.heading;
     ship.health = snap.health;
     ship.sinkProgress = snap.sink;
+    ship.sailsDown = snap.sail;
   }
 
   /** Host: a guest's connection dropped. */
@@ -519,7 +622,10 @@ export class Game {
     this.splashes = [];
     this.pendingSplash = [];
     this.icebergs = [];
+    this.remoteIcebergs = [];
+    this.pendingCraters = [];
     this.clouds = [];
+    this.wakes.clear();
     this.paused = false;
     this.buildSlots();
     if (this.mode.kind === 'host') {
@@ -593,10 +699,13 @@ export class Game {
     const count = 1 + Math.floor(Math.random() * 3); // 1–3
     for (let tries = 0; bergs.length < count && tries < 200; tries++) {
       const r = 40 + Math.random() * 35;
+      const hp = Math.max(3, Math.round(r / 11)); // bigger bergs take more pounding
       const candidate = {
         x: r + 20 + Math.random() * (WORLD_W - 2 * r - 40),
         y: r + 20 + Math.random() * (WORLD_H - 2 * r - 40),
         r,
+        hp,
+        maxHp: hp,
       };
       const cx = WORLD_W / 2;
       const cy = WORLD_H / 2;
@@ -610,16 +719,30 @@ export class Game {
     return bergs;
   }
 
-  /** A few translucent clouds that drift downwind across the arena. */
+  /**
+   * A few translucent clouds that drift downwind. Each gets a fixed set of
+   * puff lobes (so the silhouette is stable and identical on every client)
+   * and its own opacity anywhere from clear to fully solid.
+   */
   private makeClouds(): Cloud[] {
     const clouds: Cloud[] = [];
     const count = 2 + Math.floor(Math.random() * 3); // 2–4
     for (let i = 0; i < count; i++) {
+      const r = 90 + Math.random() * 90;
+      const lobeCount = 4 + Math.floor(Math.random() * 3); // 4–6
+      const lobes = [{ dx: 0, dy: 0, r: r * 0.7 }]; // body
+      for (let j = 0; j < lobeCount; j++) {
+        const a = (j / lobeCount) * Math.PI * 2 + Math.random() * 0.7;
+        const off = r * (0.28 + Math.random() * 0.38);
+        lobes.push({ dx: Math.cos(a) * off, dy: Math.sin(a) * off * 0.6, r: r * (0.42 + Math.random() * 0.4) });
+      }
       clouds.push({
         x: Math.random() * WORLD_W,
         y: Math.random() * WORLD_H,
-        r: 90 + Math.random() * 90,
+        r,
         speed: 14 + Math.random() * 16,
+        alpha: Math.random(), // 0 (invisible) … 1 (a solid bank you can hide behind)
+        lobes,
       });
     }
     return clouds;
@@ -684,10 +807,11 @@ export class Game {
     }
   }
 
-  /** Every battle opens in broadside (the realistic default); keep the self
-   * slot's fire mode in lockstep with the HUD label so they never disagree. */
+  /** Every battle opens in broadside (the realistic default) with sails set;
+   * keep the self slot's state in lockstep with the HUD so they never disagree. */
   private enterBattleFireMode() {
     this.myFireMode = 'volley';
+    this.myFurled = false;
     const self = this.selfSlot;
     if (self) self.fireMode = 'volley';
   }
@@ -714,6 +838,7 @@ export class Game {
       traveled += speed * step;
       for (const isl of this.islands) {
         if (Math.hypot(x - isl.x, y - isl.y) < isl.r + ship.width / 2 + 12) return traveled;
+        if (this.pierDist(x, y, isl) < Game.PIER_HALF_W + ship.width / 2 + 12) return traveled;
       }
       for (const berg of this.icebergs) {
         if (Math.hypot(x - berg.x, y - berg.y) < berg.r + ship.width / 2 + 12) return traveled;
@@ -750,6 +875,27 @@ export class Game {
     }
     slot.avoid = best === chase ? 0 : best;
     return best;
+  }
+
+  // Pier geometry, shared by drawing, collision, and AI avoidance.
+  private static PIER_HALF_W = 5;
+  private pierExtent(isl: Island) {
+    return { inner: isl.r * 0.5, outer: isl.r + 26 + isl.r * 0.45 };
+  }
+
+  /** Distance from a point to an island's pier segment (Infinity if none). */
+  private pierDist(px: number, py: number, isl: Island): number {
+    if (isl.pier == null) return Infinity;
+    const dx = Math.cos(isl.pier);
+    const dy = Math.sin(isl.pier);
+    const { inner, outer } = this.pierExtent(isl);
+    const ax = isl.x + dx * inner;
+    const ay = isl.y + dy * inner;
+    const abx = dx * (outer - inner);
+    const aby = dy * (outer - inner);
+    const len2 = abx * abx + aby * aby;
+    const t = Math.max(0, Math.min(1, ((px - ax) * abx + (py - ay) * aby) / len2));
+    return Math.hypot(px - (ax + abx * t), py - (ay + aby * t));
   }
 
   private nearestEnemy(ship: Ship): Ship | null {
@@ -803,6 +949,10 @@ export class Game {
     if (keyF && !this.prevKeyF) this.toggleFireMode();
     this.prevKeyF = keyF;
 
+    const keyW = this.input.isDown('KeyW');
+    if (keyW && !this.prevKeyW) this.toggleSails();
+    this.prevKeyW = keyW;
+
     let turn: Turn = 0;
     if (this.input.isDown('ArrowLeft') || this.input.isDown('KeyA')) turn = -1;
     if (this.input.isDown('ArrowRight') || this.input.isDown('KeyD')) turn = 1;
@@ -815,6 +965,7 @@ export class Game {
         drop: this.input.isDown('KeyS') || this.input.isDown('ArrowDown'),
         restart: this.over && (this.input.isDown('KeyR') || this.tapRestart),
         mode: this.myFireMode,
+        sail: this.myFurled,
       });
       // The host simulates; we just animate our local effects.
       for (const ex of this.explosions) ex.update(dt);
@@ -847,10 +998,12 @@ export class Game {
       let shipTurn: Turn = 0;
       let fire = false;
       let drop = false;
+      let sailsDown = false;
       if (slot.id === this.selfId) {
         shipTurn = turn;
         fire = this.input.isDown('Space');
         drop = this.input.isDown('KeyS') || this.input.isDown('ArrowDown');
+        sailsDown = this.myFurled;
       } else if (slot.ai) {
         const target = this.nearestEnemy(ship);
         shipTurn = this.aiTurn(slot, ship, target);
@@ -859,14 +1012,18 @@ export class Game {
         shipTurn = slot.input.turn;
         fire = slot.input.fire;
         drop = slot.input.drop;
+        sailsDown = slot.input.sail;
       }
 
-      ship.update(dt, shipTurn, WORLD_W, WORLD_H, this.windVec);
+      ship.update(dt, shipTurn, WORLD_W, WORLD_H, this.windVec, sailsDown);
 
-      // Running into an island sinks the ship outright (no scorer).
+      // Running into an island — or its solid wooden pier — sinks the ship
+      // outright (no scorer).
       if (ship.alive) {
         for (const isl of this.islands) {
-          if (Math.hypot(ship.x - isl.x, ship.y - isl.y) < isl.r + ship.width / 2) {
+          const hitLand = Math.hypot(ship.x - isl.x, ship.y - isl.y) < isl.r + ship.width / 2;
+          const hitPier = this.pierDist(ship.x, ship.y, isl) < Game.PIER_HALF_W + ship.width / 2;
+          if (hitLand || hitPier) {
             ship.health = 0;
             this.explosions.push(new Explosion(ship.x, ship.y));
             this.pendingBoom.push({ x: ship.x, y: ship.y });
@@ -876,15 +1033,15 @@ export class Game {
       }
 
       // Scraping an iceberg's submerged bulk gouges a chunk of health — but
-      // a few seconds' immunity stops it grinding you down every frame.
+      // a few seconds' immunity stops it grinding you down every frame. The
+      // collision also splinters the berg, which can shatter it outright.
       if (ship.alive && ship.bergSafe <= 0) {
         for (const berg of this.icebergs) {
           if (Math.hypot(ship.x - berg.x, ship.y - berg.y) < berg.r + ship.width / 2) {
             const dmg = Math.max(1, Math.ceil(ship.maxHealth * ICEBERG_DAMAGE_FRAC));
             for (let i = 0; i < dmg; i++) ship.takeHit();
             ship.bergSafe = ICEBERG_SAFE;
-            this.explosions.push(new Explosion(ship.x, ship.y));
-            this.pendingBoom.push({ x: ship.x, y: ship.y });
+            this.damageBerg(berg, ICEBERG_IMPACT_DMG, ship.x, ship.y);
             break;
           }
         }
@@ -947,9 +1104,22 @@ export class Game {
         }
       }
       if (ball.spent) continue;
-      for (const isl of this.islands) {
+      // Cannonballs that strike the visible ice chip away at the berg.
+      for (const berg of this.icebergs) {
+        if (Math.hypot(ball.x - berg.x, ball.y - berg.y) < berg.r * ICEBERG_TIP_FRAC) {
+          ball.spent = true;
+          this.damageBerg(berg, 1, ball.x, ball.y);
+          break;
+        }
+      }
+      if (ball.spent) continue;
+      for (let bi = 0; bi < this.islands.length; bi++) {
+        const isl = this.islands[bi];
         if (Math.hypot(ball.x - isl.x, ball.y - isl.y) < isl.r) {
-          ball.spent = true; // cannonballs don't pass through islands
+          ball.spent = true; // cannonballs don't pass through islands — they scar them
+          this.addCrater(bi, ball.x, ball.y);
+          this.explosions.push(new Explosion(ball.x, ball.y));
+          this.pendingBoom.push({ x: ball.x, y: ball.y });
           break;
         }
       }
@@ -990,14 +1160,18 @@ export class Game {
           score: s.score,
           guns: s.ship!.gunReload,
           mineCool: s.mineCool,
+          sail: s.ship!.sailsDown,
         })),
         balls: this.cannonballs.map((b) => ({ x: b.x, y: b.y, p: b.p })),
         mines: this.mineSnaps(),
+        icebergs: this.icebergs,
+        craters: this.pendingCraters,
         boom: this.pendingBoom,
         splash: this.pendingSplash,
       });
       this.pendingBoom = [];
       this.pendingSplash = [];
+      this.pendingCraters = [];
     }
   }
 
@@ -1087,6 +1261,34 @@ export class Game {
     this.mines = this.mines.filter((m) => !m.spent);
   }
 
+  /** Chip an iceberg; shatter and remove it once its ice is spent. */
+  private damageBerg(berg: Iceberg, dmg: number, x: number, y: number) {
+    berg.hp -= dmg;
+    this.explosions.push(new Explosion(x, y));
+    this.pendingBoom.push({ x, y });
+    if (berg.hp <= 0) {
+      this.icebergs = this.icebergs.filter((b) => b !== berg);
+      // A burst of ice and spray where it stood.
+      for (let i = 0; i < 4; i++) {
+        const ex = berg.x + (Math.random() - 0.5) * berg.r * 1.2;
+        const ey = berg.y + (Math.random() - 0.5) * berg.r * 1.2;
+        this.explosions.push(new Explosion(ex, ey));
+        this.pendingBoom.push({ x: ex, y: ey });
+      }
+      this.splashes.push(new Splash(berg.x, berg.y));
+      this.pendingSplash.push({ x: berg.x, y: berg.y });
+    }
+  }
+
+  /** Record a cannonball scar on an island (cosmetic; islands never sink). */
+  private addCrater(i: number, x: number, y: number) {
+    const isl = this.islands[i];
+    if (!isl.craters) isl.craters = [];
+    if (isl.craters.length >= ISLAND_MAX_CRATERS) isl.craters.shift();
+    isl.craters.push({ x, y });
+    this.pendingCraters.push({ i, x, y });
+  }
+
   /** Blow a barrel: damage every ship in the blast and credit the owner. */
   private detonate(mine: Mine, radius: number) {
     for (const slot of this.slots) {
@@ -1152,8 +1354,12 @@ export class Game {
       this.drawShipSelect();
     } else {
       const ctx = this.ctx;
+      const now = performance.now();
       this.drawIslands();
+      this.drawPenguins(now);
       this.drawIcebergs();
+      this.recordWakes(now);
+      this.drawWakes(now);
       this.drawMines();
       for (const sp of this.splashes) sp.draw(ctx);
       if (this.mode.kind === 'guest') {
@@ -1252,6 +1458,67 @@ export class Game {
       blob(isl.r * 0.55);
       ctx.fillStyle = '#4f7a3a'; // scrub on top
       ctx.fill();
+
+      this.drawBuildings(isl);
+
+      // Cannonball scars: dark blast craters that accrue but never sink the isle.
+      if (isl.craters) {
+        for (const c of isl.craters) {
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, 3.2, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(40, 28, 16, 0.55)';
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, 1.4, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(20, 12, 6, 0.7)';
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  /** A hut or two (and a lighthouse on the bigger isles) for some islands. */
+  private drawBuildings(isl: Island) {
+    const seed = isl.x * 0.09 + isl.y * 0.11;
+    if (jitter(seed, 50) < 0.45) return; // only some islands are settled
+    const ctx = this.ctx;
+    const huts = 1 + Math.floor(jitter(seed, 51) * 2); // 1–2 huts
+    for (let i = 0; i < huts; i++) {
+      const a = jitter(seed, 60 + i) * Math.PI * 2;
+      const rad = isl.r * (0.12 + jitter(seed, 70 + i) * 0.28);
+      const x = isl.x + Math.cos(a) * rad;
+      const y = isl.y + Math.sin(a) * rad;
+      const s = 4 + jitter(seed, 80 + i) * 2;
+      // wall
+      ctx.fillStyle = '#b07a44';
+      ctx.fillRect(x - s / 2, y - s / 2, s, s);
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 0.6;
+      ctx.strokeRect(x - s / 2, y - s / 2, s, s);
+      // roof
+      ctx.beginPath();
+      ctx.moveTo(x - s / 2 - 1, y - s / 2);
+      ctx.lineTo(x, y - s / 2 - s * 0.7);
+      ctx.lineTo(x + s / 2 + 1, y - s / 2);
+      ctx.closePath();
+      ctx.fillStyle = '#7a3b2a';
+      ctx.fill();
+      ctx.stroke();
+    }
+    // A lighthouse crowns large, settled islands.
+    if (isl.r > 55 && jitter(seed, 90) > 0.4) {
+      const x = isl.x;
+      const y = isl.y - isl.r * 0.1;
+      ctx.fillStyle = '#eee';
+      ctx.fillRect(x - 2.5, y - 12, 5, 12);
+      ctx.fillStyle = '#c0392b';
+      ctx.fillRect(x - 2.5, y - 9, 5, 2.5);
+      ctx.fillRect(x - 2.5, y - 4, 5, 2.5);
+      ctx.fillStyle = '#ffd75e'; // lit lantern room
+      ctx.fillRect(x - 1.8, y - 14, 3.6, 2.6);
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 0.6;
+      ctx.strokeRect(x - 2.5, y - 12, 5, 12);
     }
   }
 
@@ -1303,25 +1570,40 @@ export class Game {
     ctx.restore();
   }
 
-  /** Icebergs: a small bright tip above water hinting at the danger below. */
+  /**
+   * Icebergs: an irregular ice shard above water. The submerged bulk is left
+   * almost invisible on purpose — you can't read the true danger radius, so
+   * they're easy to blunder into (the whole Titanic point).
+   */
   private drawIcebergs() {
     const ctx = this.ctx;
-    for (const berg of this.icebergs) {
-      // Faint halo showing the submerged bulk you can strike from afar.
+    const bergs = this.mode.kind === 'guest' ? this.remoteIcebergs : this.icebergs;
+    for (const berg of bergs) {
+      const seed = berg.x * 0.13 + berg.y * 0.17;
+      const rot = jitter(seed, 1) * Math.PI;
+      const aspect = 0.55 + jitter(seed, 2) * 0.7; // squashed one way → irregular
+      const cosR = Math.cos(rot);
+      const sinR = Math.sin(rot);
+
+      // Barely-there hint of the submerged mass — almost imperceptible.
       ctx.beginPath();
       ctx.arc(berg.x, berg.y, berg.r, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(180, 215, 235, 0.12)';
+      ctx.fillStyle = 'rgba(195, 222, 240, 0.05)';
       ctx.fill();
 
-      // The visible tip: a jagged ice shard, seeded from its position.
+      // Jagged tip, elongated and rotated for an irregular silhouette.
       const tip = berg.r * 0.42;
-      const facets = 9;
+      const facets = 11;
+      const pt = (a: number, scale = 1) => {
+        const wob = (0.45 + 0.8 * jitter(seed, Math.round(a * 100) + 5)) * scale;
+        const lx = Math.cos(a) * tip * wob;
+        const ly = Math.sin(a) * tip * wob * aspect;
+        return [berg.x + lx * cosR - ly * sinR, berg.y + lx * sinR + ly * cosR] as const;
+      };
+
       ctx.beginPath();
       for (let i = 0; i <= facets; i++) {
-        const a = (i / facets) * Math.PI * 2;
-        const wob = 0.72 + 0.42 * jitter(berg.x + berg.y, i);
-        const rx = berg.x + Math.cos(a) * tip * wob;
-        const ry = berg.y + Math.sin(a) * tip * wob;
+        const [rx, ry] = pt((i / facets) * Math.PI * 2);
         i === 0 ? ctx.moveTo(rx, ry) : ctx.lineTo(rx, ry);
       }
       ctx.closePath();
@@ -1330,39 +1612,114 @@ export class Game {
       ctx.strokeStyle = 'rgba(120, 160, 185, 0.7)';
       ctx.lineWidth = 1.5;
       ctx.stroke();
-      // a couple of shaded facets for a bit of 3D
+
+      // A shaded inner facet for a touch of 3D.
+      const [ax, ay] = pt(rot - 1.1, 0.5);
+      const [bx, by] = pt(rot + 0.7, 0.55);
       ctx.beginPath();
-      ctx.moveTo(berg.x, berg.y - tip * 0.5);
-      ctx.lineTo(berg.x + tip * 0.5, berg.y + tip * 0.4);
-      ctx.lineTo(berg.x - tip * 0.3, berg.y + tip * 0.5);
+      ctx.moveTo(berg.x, berg.y);
+      ctx.lineTo(ax, ay);
+      ctx.lineTo(bx, by);
       ctx.closePath();
-      ctx.fillStyle = 'rgba(173, 206, 226, 0.7)';
+      ctx.fillStyle = 'rgba(168, 202, 224, 0.6)';
       ctx.fill();
+
+      // Cracks spider out from the centre as the ice gets pounded.
+      const cracks = Math.round((1 - berg.hp / berg.maxHp) * 5);
+      if (cracks > 0) {
+        ctx.strokeStyle = 'rgba(95, 130, 155, 0.85)';
+        ctx.lineWidth = 0.8;
+        for (let c = 0; c < cracks; c++) {
+          const [ex, ey] = pt((c / 5) * Math.PI * 2 + 0.4, 0.85);
+          ctx.beginPath();
+          ctx.moveTo(berg.x, berg.y);
+          ctx.lineTo(ex, ey);
+          ctx.stroke();
+        }
+      }
     }
   }
 
-  /** Soft translucent clouds drifting over the battlefield. */
+  /**
+   * Clouds drifting over the battlefield. Each is one flattened path of puff
+   * lobes filled a single time, so a self-overlapping shape stays one uniform
+   * opacity instead of banding where lobes cross.
+   */
   private drawClouds() {
     const ctx = this.ctx;
-    ctx.save();
     for (const c of this.clouds) {
-      // A fluffy blob from a few overlapping lobes, seeded so it's stable.
-      const lobes = 5;
-      for (let i = 0; i < lobes; i++) {
-        const a = (i / lobes) * Math.PI * 2;
-        const off = c.r * 0.45;
-        const lr = c.r * (0.55 + 0.3 * jitter(c.r + i, i));
+      ctx.beginPath();
+      for (const lobe of c.lobes) {
+        const lx = c.x + lobe.dx;
+        const ly = c.y + lobe.dy;
+        ctx.moveTo(lx + lobe.r, ly);
+        ctx.arc(lx, ly, lobe.r, 0, Math.PI * 2);
+      }
+      ctx.fillStyle = `rgba(234, 241, 248, ${c.alpha})`;
+      ctx.fill(); // nonzero winding unions the lobes → one flat opacity
+    }
+  }
+
+  /**
+   * Lay down foam puffs behind each moving hull. Driven off rendered position
+   * so it works the same on the host, solo, and guests (whose ships move via
+   * snapshots). Purely cosmetic — never networked.
+   */
+  private recordWakes(now: number) {
+    for (const slot of this.slots) {
+      const ship = slot.ship;
+      let pts = this.wakes.get(slot.id);
+      if (ship && ship.alive && ship.sinkProgress === 0) {
+        const sx = ship.x - Math.cos(ship.heading) * (ship.length / 2);
+        const sy = ship.y - Math.sin(ship.heading) * (ship.length / 2);
+        if (!pts) {
+          pts = [];
+          this.wakes.set(slot.id, pts);
+        }
+        const last = pts[pts.length - 1];
+        const d = last ? Math.hypot(sx - last.x, sy - last.y) : Infinity;
+        if (d > 60) pts.length = 0; // teleport / world-wrap: don't streak across
+        if (!last || d > WAKE_GAP) pts.push({ x: sx, y: sy, born: now });
+      }
+      if (pts) {
+        const live = pts.filter((p) => now - p.born < WAKE_LIFE);
+        if (live.length) this.wakes.set(slot.id, live);
+        else this.wakes.delete(slot.id);
+      }
+    }
+  }
+
+  private drawWakes(now: number) {
+    const ctx = this.ctx;
+    for (const pts of this.wakes.values()) {
+      for (const p of pts) {
+        const age = (now - p.born) / WAKE_LIFE; // 0 → 1
         ctx.beginPath();
-        ctx.arc(c.x + Math.cos(a) * off, c.y + Math.sin(a) * off * 0.6, lr, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(236, 242, 248, 0.16)';
+        ctx.arc(p.x, p.y, 2 + age * 6, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 255, 255, ${(1 - age) * 0.3})`;
         ctx.fill();
       }
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, c.r * 0.7, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(240, 245, 250, 0.18)';
-      ctx.fill();
     }
-    ctx.restore();
+  }
+
+  /** Little tuxedoed locals waddling about each island, milkshakes in flipper. */
+  private drawPenguins(now: number) {
+    const t = now / 1000;
+    for (const isl of this.islands) {
+      const seed = isl.x * 0.07 + isl.y * 0.05;
+      const count = Math.min(3, 1 + Math.floor(isl.r / 28));
+      for (let i = 0; i < count; i++) {
+        const phase = jitter(seed, i) * Math.PI * 2;
+        const dir = jitter(seed, i + 7) > 0.5 ? 1 : -1;
+        const orbit = isl.r * (0.22 + jitter(seed, i + 3) * 0.26);
+        const ang = phase + t * 0.35 * dir;
+        const px = isl.x + Math.cos(ang) * orbit;
+        const py = isl.y + Math.sin(ang) * orbit * 0.85;
+        // Face the way they're walking (tangent's x sign).
+        const facing = -Math.sin(ang) * dir >= 0 ? 1 : -1;
+        drawPenguin(this.ctx, px, py, facing, t, phase);
+      }
+    }
   }
 
   /** Frozen-by-host overlay. */
@@ -1630,6 +1987,11 @@ export class Game {
     ctx.fillRect(x0, y0 + 16, totalW, 10);
     ctx.fillStyle = mineFrac >= 1 ? '#e8742c' : 'rgba(232, 116, 44, 0.55)';
     ctx.fillRect(x0, y0 + 16, totalW * mineFrac, 10);
+
+    // Sail state, just under the bars.
+    ctx.textAlign = 'center';
+    ctx.fillStyle = this.myFurled ? '#ffd75e' : 'rgba(255, 255, 255, 0.7)';
+    ctx.fillText(this.myFurled ? '⛵ Sails furled — drifting (W)' : '⛵ Sails set (W)', cx, y0 + 34);
   }
 
   /** Wind dial top-center: an arrow pointing where the wind blows, plus strength. */

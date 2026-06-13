@@ -74,6 +74,19 @@ canvas {
   font-size: 22px;
 }
 
+#tc-sail {
+  right: calc(190px + env(safe-area-inset-right));
+  width: 60px;
+  height: 60px;
+  bottom: calc(34px + env(safe-area-inset-bottom));
+  font-size: 22px;
+}
+
+#tc-mode.active,
+#tc-sail.active {
+  background: rgba(63, 122, 38, 0.6);
+}
+
 #tc-mode {
   right: calc(30px + env(safe-area-inset-right));
   bottom: calc(124px + env(safe-area-inset-bottom));

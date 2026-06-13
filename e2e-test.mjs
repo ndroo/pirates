@@ -178,7 +178,7 @@ const berg = await host2.evaluate(() => {
   const ship = g.slots[0].ship;
   ship.health = ship.maxHealth;
   ship.bergSafe = 0;
-  g.icebergs = [{ x: ship.x, y: ship.y, r: 60 }];
+  g.icebergs = [{ x: ship.x, y: ship.y, r: 60, hp: 8, maxHp: 8 }]; // tough enough to survive the scrape
   return { max: ship.maxHealth };
 });
 await host2.waitForFunction(
@@ -274,6 +274,80 @@ await host2.waitForFunction(
 );
 console.log('ramming takes half max health ✓');
 
+// --- Solid pier: a ship that hits a jetty (off the island itself) sinks. ---
+await host2.evaluate(() => {
+  const g = window.__game;
+  g.islands = [{ x: 300, y: 300, r: 50, pier: 0, craters: [] }]; // pier along +x
+  g.icebergs = [];
+  const a = g.slots[0].ship;
+  a.health = a.maxHealth;
+  a.x = 300 + (50 + 26 + 50 * 0.45) - 8; // on the outboard plank, clear of the land
+  a.y = 300;
+});
+await host2.waitForFunction(() => !window.__game.slots[0].ship.alive, null, { timeout: 4000 });
+console.log('solid pier sinks a ship ✓');
+
+// --- Cannonballs scar islands (damaged, never destroyed) and the scar syncs. ---
+await host2.evaluate(() => {
+  const g = window.__game;
+  g.islands = [{ x: 400, y: 470, r: 55, craters: [] }];
+  g.icebergs = [];
+  const a = g.slots[0].ship;
+  const b = g.slots[1].ship;
+  a.health = a.maxHealth;
+  a.x = 400; a.y = 340; a.heading = 0;
+  a.gunReload = a.gunReload.map(() => 0);
+  b.health = b.maxHealth;
+  b.x = 400; b.y = 640; // beyond the island, so the broadside fires through it
+  g.cannonballs.length = 0;
+});
+await host2.bringToFront();
+await host2.keyboard.down('Space');
+await host2.waitForFunction(() => window.__game.islands[0].craters.length > 0, null, { timeout: 8000, polling: 50 });
+await host2.keyboard.up('Space');
+console.log('cannonball scars the island ✓');
+await guest3.waitForFunction(() => (window.__game.islands[0]?.craters?.length ?? 0) > 0, null, { timeout: 5000, polling: 100 });
+const islandAlive = await host2.evaluate(() => window.__game.islands.length === 1);
+if (!islandAlive) throw new Error('island was destroyed — it should only be scarred');
+console.log('island scar synced to guest; island survives ✓');
+
+// --- Icebergs shatter under gunfire... ---
+await host2.evaluate(() => {
+  const g = window.__game;
+  g.islands = [];
+  g.icebergs = [{ x: 400, y: 470, r: 50, hp: 1, maxHp: 4 }]; // one hit from gone
+  const a = g.slots[0].ship;
+  a.x = 400; a.y = 340; a.heading = 0;
+  a.gunReload = a.gunReload.map(() => 0);
+  g.slots[1].ship.x = 400; g.slots[1].ship.y = 640;
+  g.cannonballs.length = 0;
+});
+await host2.keyboard.down('Space');
+await host2.waitForFunction(() => window.__game.icebergs.length === 0, null, { timeout: 8000, polling: 50 });
+await host2.keyboard.up('Space');
+console.log('gunfire shatters an iceberg ✓');
+
+// --- ...and under ramming impact (the ship survives the scrape). ---
+await host2.evaluate(() => {
+  const g = window.__game;
+  g.icebergs = [{ x: 300, y: 300, r: 48, hp: 1, maxHp: 4 }];
+  const a = g.slots[0].ship;
+  a.health = a.maxHealth;
+  a.bergSafe = 0;
+  a.x = 300; a.y = 300;
+});
+await host2.waitForFunction(
+  () => window.__game.icebergs.length === 0 && window.__game.slots[0].ship.alive,
+  null, { timeout: 5000 },
+);
+console.log('ramming shatters an iceberg, ship survives ✓');
+await host2.evaluate(() => {
+  const g = window.__game;
+  g.icebergs = [];
+  g.islands = [];
+  g.slots[0].ship.health = g.slots[0].ship.maxHealth;
+});
+
 // --- Banter relays both ways and shows in the feed. ---
 await guest3.keyboard.press('Enter');
 await guest3.waitForSelector('#chat-bar:not([hidden])', { timeout: 3000 });
@@ -290,21 +364,46 @@ await host2.keyboard.press('Enter');
 await guest3.waitForFunction(() => window.__game.chats.some((c) => c.from === 0), null, { timeout: 5000 });
 console.log('banter relayed both ways ✓');
 
-// --- Host pause freezes both screens; resume lets the guest's ship move again. ---
+// --- Host pause (via the P key) freezes both screens; resume frees them. ---
 await host2.evaluate(() => { window.__game.slots[1].ship.health = window.__game.slots[1].ship.maxHealth; });
 await guest3.keyboard.down('ArrowLeft'); // guest tries to turn while paused
-await host2.evaluate(() => window.__game.togglePause());
+await host2.bringToFront();
+await host2.keyboard.press('p');
 await guest3.waitForFunction(() => window.__game.isPaused, null, { timeout: 5000 });
 const frozen = await guest3.evaluate(() => window.__game.slots[1].ship.heading);
 await guest3.waitForTimeout(700);
 const stillFrozen = await guest3.evaluate(() => window.__game.slots[1].ship.heading);
 if (frozen !== stillFrozen) throw new Error('guest ship moved while paused');
-console.log('host pause froze the battle on the guest ✓');
-await host2.evaluate(() => window.__game.togglePause());
+console.log('host pause (P key) froze the battle on the guest ✓');
+await host2.keyboard.press('p');
 await guest3.waitForFunction(() => !window.__game.isPaused, null, { timeout: 5000 });
 await guest3.waitForFunction((h) => window.__game.slots[1].ship.heading !== h, stillFrozen, { timeout: 5000 });
 await guest3.keyboard.up('ArrowLeft');
-console.log('resume unfroze the battle ✓');
+console.log('resume (P key) unfroze the battle ✓');
+
+// --- Drop sail: furled, the ship makes no headway and rides the wind instead. ---
+await host2.evaluate(() => {
+  const g = window.__game;
+  g.islands = []; g.icebergs = [];
+  g.wind = { dir: 0, strength: 0.35 }; // strong wind blowing +x
+  const a = g.slots[0].ship;
+  a.health = a.maxHealth;
+  a.x = 200; a.y = 360; a.heading = -Math.PI / 2; // pointing up, across the wind
+  window.__sail0 = { x: a.x, y: a.y };
+});
+await host2.bringToFront();
+await pressUntil(host2, 'KeyW', () => window.__game.myFurled === true, 'furled sails');
+await host2.waitForTimeout(900);
+const drift = await host2.evaluate(() => {
+  const a = window.__game.slots[0].ship;
+  return { dx: a.x - window.__sail0.x, dy: a.y - window.__sail0.y };
+});
+// Pointing up but sails down in an eastward wind → drifts mostly +x, not -y.
+if (drift.dx < 20 || Math.abs(drift.dy) > Math.abs(drift.dx)) {
+  throw new Error(`furled ship did not drift downwind: ${JSON.stringify(drift)}`);
+}
+console.log(`drop sail: drifts downwind ${Math.round(drift.dx)}px, not under power ✓`);
+await pressUntil(host2, 'KeyW', () => window.__game.myFurled === false, 'sails reset');
 
 await host2.keyboard.down('Space'); // both auto-aim and blast away
 await guest3.keyboard.down('Space');

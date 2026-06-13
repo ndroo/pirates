@@ -67,8 +67,10 @@ still running the old one.
 | `←` / `→` or `A` / `D` | Steer left / right |
 | `Space` | Fire (full broadside, or one gun per press in rolling mode) |
 | `F` | Toggle fire mode: broadside volley ↔ rolling single guns |
+| `W` | Furl / set sails (furled = drift with the wind, no steering power lost) |
 | `S` / `↓` | Drop a barrel mine off the stern |
 | `Enter` | Open the chat bar (multiplayer) |
+| `P` | Host only: pause / resume the battle |
 | `R` | After a battle ends, return to ship select |
 
 On phones, on-screen buttons cover steering, FIRE, the barrel, the fire-mode
@@ -116,15 +118,24 @@ chosen at random each battle. All type stats live in one table
   fizzle out. Cannonballs detonate them harmlessly.
 - **Ramming**: burying your bow in another hull costs them half their max
   health (a short immunity stops one collision from landing twice).
-- **Icebergs** appear some rounds: only a small tip shows above the surface,
-  but the submerged bulk has a much larger strike radius (Titanic-style), so
-  you can run into one well before it looks close. A scrape gouges ~40% of
-  your max health rather than sinking you outright, with a few seconds'
-  immunity to sail clear.
-- Some islands sport a **wooden pier**; cannonballs and ships still treat the
-  island as its circular landmass.
-- Drifting **clouds** float downwind across the arena, dimming the view of
-  whatever passes beneath them (the HUD stays clear).
+- **Drop sail** (`W`): furl your sails to cut propulsion and simply drift
+  with the wind — useful to hold near a spot, lurk, or stop short of a hazard.
+  You can still swing the hull to aim a broadside while drifting. Furled sails
+  show as bare yards.
+- **Icebergs** appear some rounds: only a small, irregular tip shows above the
+  surface while the submerged bulk has a much larger, near-invisible strike
+  radius (Titanic-style), so you run into one before it looks close. A scrape
+  gouges ~40% of your max health (not an instant sink), with a few seconds'
+  immunity to sail clear. Unlike islands, icebergs are **destructible** — they
+  shatter under enough cannon fire or ramming impacts.
+- **Islands take damage but never sink**: cannonballs leave accumulating
+  scorch craters on them. Some islands are settled, with **huts, a lighthouse,
+  and penguins** waddling about sipping milkshakes. A **wooden pier** juts from
+  some — and it's solid: clip the jetty and you go down with it.
+- Drifting **clouds** float downwind across the arena, each a different
+  randomly-chosen opacity (a few are solid banks you can duck behind), dimming
+  the view of whatever passes beneath them. The HUD stays clear.
+- Every ship leaves a fading **wake** as it sails.
 - Cannonballs fly a visible ballistic arc and splash where they land; badly
   hurt ships scorch, tatter, and pour smoke.
 - **Banter** (`Enter`): messages relay through the host and appear as speech

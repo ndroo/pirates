@@ -67,8 +67,10 @@ still running the old one.
 | `←` / `→` or `A` / `D` | Steer left / right |
 | `Space` | Fire (full broadside, or one gun per press in rolling mode) |
 | `F` | Toggle fire mode: broadside volley ↔ rolling single guns |
-| `W` | Furl / set sails (furled = drift with the wind, no steering power lost) |
+| `W` | Furl / set sails — or, on a submarine, toggle the engine |
+| `E` | Submarine only: dive / surface (3 s each) |
 | `S` / `↓` | Drop a barrel mine off the stern |
+| `Tab` (hold) | Show the scoreboard (career sinks across all rounds) |
 | `Enter` | Open the chat bar (multiplayer) |
 | `P` | Host only: pause / resume the battle |
 | `R` | After a battle ends, return to ship select |
@@ -91,6 +93,13 @@ line up its own broadside.
 | Small | fast (110 px/s) | tight | 2 | 3 |
 | Medium | steady (80 px/s) | moderate | 3 | 5 |
 | Large | slow (55 px/s) | sluggish | 4 | 8 |
+| Submarine | engine (90 px/s) | nimble | 2 | 4 |
+
+The **submarine** is engine-powered (wind doesn't touch it) and can **dive**
+(`E`) and surface — each takes 3 seconds. Submerged, it's invisible to
+everyone else and can't be shot, rammed, or mined… but it can't fire either:
+guns only work fully surfaced. It toggles its **engine** on/off (`W`) instead
+of adjusting sails. The AI sails surface ships only.
 
 Small ships dodge and harass; large ships are slow-turning fortresses that can
 delete a small ship with one well-placed volley. The enemy's ship type is
@@ -129,9 +138,14 @@ chosen at random each battle. All type stats live in one table
   immunity to sail clear. Unlike islands, icebergs are **destructible** — they
   shatter under enough cannon fire or ramming impacts.
 - **Islands take damage but never sink**: cannonballs leave accumulating
-  scorch craters on them. Some islands are settled, with **huts, a lighthouse,
-  and penguins** waddling about sipping milkshakes. A **wooden pier** juts from
-  some — and it's solid: clip the jetty and you go down with it.
+  scorch craters on them. Some islands are settled, with **huts and a
+  lighthouse**. A **wooden pier** juts from some — it's solid (clip the jetty
+  and you go down with it) but can be **blown apart** by cannon fire. Solo
+  (vs-AI) maps skip piers, since the AI can snag on them.
+- **Penguins** waddle around the icebergs sipping thick milkshakes.
+- A **scoreboard** (hold `Tab`, or the mobile 🏆 button) ranks everyone by a
+  **career sink count** that carries across rematches, and shows the final
+  standings on game over.
 - Drifting **clouds** float downwind across the arena, each a different
   randomly-chosen opacity (a few are solid banks you can duck behind), dimming
   the view of whatever passes beneath them. The HUD stays clear.

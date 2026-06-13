@@ -671,8 +671,14 @@ await phone.tap('#solo-btn');
 await phone.waitForSelector('#lobby', { state: 'detached', timeout: 10000 });
 
 const canvasBox = await phone.locator('canvas').boundingBox();
-await phone.tap('canvas', { position: { x: canvasBox.width / 2, y: canvasBox.height / 2 } }); // middle card
-await phone.waitForFunction(() => window.__game.phase === 'battle', null, { timeout: 5000 });
+// Tap the 2nd card (medium) — world x = WORLD_W/2 - 100 — scaled to the display.
+await phone.tap('canvas', {
+  position: { x: canvasBox.width * ((1280 / 2 - 100) / 1280), y: canvasBox.height / 2 },
+});
+await phone.waitForFunction(
+  () => window.__game.phase === 'battle' && window.__game.slots[0].ship.type === 'medium',
+  null, { timeout: 5000 },
+);
 console.log('mobile: tapped a ship card into battle ✓');
 
 if (!(await phone.isVisible('#tc-fire'))) throw new Error('touch controls not shown on phone');
@@ -726,6 +732,91 @@ await loner.waitForSelector('#lobby', { state: 'detached', timeout: 5000 });
 const cleanUrl = await loner.evaluate(() => location.search);
 if (cleanUrl.includes('join')) throw new Error('solo escape left ?join in the URL');
 console.log('invite screen solo escape ✓');
+
+// --- Submarine: dives over ~3s, can't fire submerged, untargetable, then fires surfaced. ---
+const subPage = await newPlayer('sub', { width: 1100, height: 700 });
+await subPage.goto(GAME_URL);
+await subPage.click('#solo-btn');
+await subPage.waitForSelector('#lobby', { state: 'detached', timeout: 10000 });
+await subPage.bringToFront();
+await hold(subPage, 'Digit4'); // pick the submarine
+await subPage.waitForFunction(() => window.__game.phase === 'battle' && window.__game.slots[0].ship.type === 'sub', null, { timeout: 5000 });
+if ((await subPage.evaluate(() => window.__game.slots[0].ship.dive)) !== 0) throw new Error('sub did not start surfaced');
+console.log('submarine selectable, starts surfaced ✓');
+
+// Place the enemy in broadside range below the sub for the firing checks.
+await subPage.evaluate(() => {
+  const g = window.__game;
+  g.islands = []; g.icebergs = [];
+  const s = g.slots[0].ship;
+  s.x = 400; s.y = 360; s.heading = 0; s.gunReload = s.gunReload.map(() => 0);
+  const e = g.slots[1].ship;
+  e.x = 400; e.y = 480;
+  g.cannonballs.length = 0;
+});
+
+// Dive: takes ~3s to submerge.
+await hold(subPage, 'KeyE');
+await subPage.waitForFunction(() => window.__game.myDive === true, null, { timeout: 3000 });
+const t0 = await subPage.evaluate(() => performance.now());
+await subPage.waitForFunction(() => window.__game.slots[0].ship.dive >= 1, null, { timeout: 6000, polling: 50 });
+const diveMs = (await subPage.evaluate(() => performance.now())) - t0;
+if (diveMs < 2200 || diveMs > 4200) throw new Error(`dive took ${Math.round(diveMs)}ms, expected ~3000`);
+console.log(`submarine dove in ${Math.round(diveMs)}ms ✓`);
+
+// Submerged: holding fire produces nothing, and the AI can't target it.
+await subPage.evaluate(() => { window.__game.cannonballs.length = 0; });
+await subPage.keyboard.down('Space');
+await subPage.waitForTimeout(900);
+await subPage.keyboard.up('Space');
+if ((await subPage.evaluate(() => window.__game.cannonballs.length)) !== 0) {
+  throw new Error('submerged submarine fired its guns');
+}
+console.log('submerged sub cannot fire, and is untargetable ✓');
+
+// Surface (~3s) and confirm the guns come back online.
+await hold(subPage, 'KeyE');
+await subPage.waitForFunction(() => window.__game.slots[0].ship.dive === 0, null, { timeout: 6000, polling: 50 });
+await subPage.evaluate(() => {
+  const g = window.__game;
+  const s = g.slots[0].ship;
+  s.x = 400; s.y = 360; s.heading = 0; s.gunReload = s.gunReload.map(() => 0);
+  g.slots[1].ship.x = 400; g.slots[1].ship.y = 480;
+  g.cannonballs.length = 0;
+});
+await subPage.keyboard.down('Space');
+await subPage.waitForFunction(() => window.__game.cannonballs.length > 0, null, { timeout: 4000, polling: 50 });
+await subPage.keyboard.up('Space');
+console.log('surfaced submarine fires again ✓');
+await subPage.close();
+
+// --- Scoreboard accumulates a career score across rematches. ---
+const careerPage = await newPlayer('career', { width: 1100, height: 700 });
+await careerPage.goto(GAME_URL);
+await careerPage.click('#solo-btn');
+await careerPage.waitForSelector('#lobby', { state: 'detached', timeout: 10000 });
+await careerPage.bringToFront();
+await hold(careerPage, 'Digit1');
+await careerPage.waitForFunction(() => window.__game.phase === 'battle', null, { timeout: 5000 });
+// Bank a couple of sinks this round, then end it and rematch.
+await careerPage.evaluate(() => {
+  const g = window.__game;
+  g.slots[0].score = 2;
+  g.slots[1].ship.health = 0; // sink the AI → game over
+});
+await careerPage.waitForFunction(() => window.__game.over, null, { timeout: 4000 });
+await hold(careerPage, 'KeyR');
+await careerPage.waitForFunction(() => window.__game.phase === 'select', null, { timeout: 4000 });
+const banked = await careerPage.evaluate(() => window.__game.careerScore.get(0) ?? 0);
+if (banked !== 2) throw new Error(`career score not banked across rematch: got ${banked}`);
+// New round: a fresh sink should add to the carried-over total.
+await hold(careerPage, 'Digit1');
+await careerPage.waitForFunction(() => window.__game.phase === 'battle', null, { timeout: 5000 });
+await careerPage.evaluate(() => { window.__game.slots[0].score = 1; });
+const liveTotal = await careerPage.evaluate(() => (window.__game.careerScore.get(0) ?? 0) + window.__game.slots[0].score);
+if (liveTotal !== 3) throw new Error(`career total wrong mid-round: got ${liveTotal}, expected 3`);
+console.log('scoreboard accumulates career score across rematches ✓');
+await careerPage.close();
 
 await browser.close();
 console.log('done');

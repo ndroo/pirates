@@ -10,10 +10,12 @@ export interface ShipStats {
 }
 
 // Small ships are fast but fragile; large ships are slow but tough.
+// The submarine is engine-powered (ignores wind) and can dive out of sight.
 export const SHIP_TYPES = {
   small: { speed: 110, turnRate: 1.6, maxHealth: 3, guns: 2, length: 42, width: 17 },
   medium: { speed: 80, turnRate: 1.2, maxHealth: 5, guns: 3, length: 56, width: 22 },
   large: { speed: 55, turnRate: 0.9, maxHealth: 8, guns: 4, length: 72, width: 28 },
+  sub: { speed: 90, turnRate: 1.3, maxHealth: 4, guns: 2, length: 50, width: 18 },
 } as const satisfies Record<string, ShipStats>;
 
 export type ShipTypeName = keyof typeof SHIP_TYPES;
@@ -44,7 +46,8 @@ export class Ship {
   gunReload: number[]; // s until each gun is ready again
   ramSafe = 0; // s of immunity left after being rammed
   bergSafe = 0; // s of immunity left after scraping an iceberg
-  sailsDown = false; // furled — drifting with the wind, no propulsion
+  sailsDown = false; // furled sails / engine off — no propulsion
+  dive = 0; // submarine only: 0 surfaced → 1 fully submerged
   sinkProgress = 0; // 0 afloat → 1 fully sunk
 
   readonly type: ShipTypeName;
@@ -113,7 +116,13 @@ export class Ship {
 
     // You can still swing the hull to bring a broadside to bear when drifting.
     this.heading += turn * this.turnRate * dt;
-    if (sailsDown) {
+    if (this.type === 'sub') {
+      // Engine-powered: wind doesn't push a submarine. Engine off = dead stop.
+      if (!sailsDown) {
+        this.x += Math.cos(this.heading) * this.speed * dt;
+        this.y += Math.sin(this.heading) * this.speed * dt;
+      }
+    } else if (sailsDown) {
       // Furled: no headway, just ride the wind.
       if (wind) {
         this.x += wind.x * SAIL_DOWN_DRIFT * dt;
@@ -145,19 +154,26 @@ export class Ship {
     return Math.abs(localX) <= this.length / 2 && Math.abs(localY) <= this.width / 2;
   }
 
-  draw(ctx: CanvasRenderingContext2D) {
+  draw(ctx: CanvasRenderingContext2D, alpha = 1) {
     if (this.sinkProgress >= 1) return;
 
     const damage = 1 - this.health / this.maxHealth;
     const fade = 1 - this.sinkProgress;
 
     ctx.save();
-    ctx.globalAlpha = fade;
+    ctx.globalAlpha = fade * alpha;
     ctx.translate(this.x, this.y);
     ctx.rotate(this.heading);
 
     const l = this.length;
     const w = this.width;
+
+    if (this.type === 'sub') {
+      this.drawSub(ctx, l, w);
+      ctx.restore();
+      this.drawSmoke(ctx, damage, fade * alpha);
+      return;
+    }
 
     // Hull: pointed bow (+x), flat stern.
     ctx.beginPath();
@@ -239,31 +255,78 @@ export class Ship {
 
     ctx.restore();
 
+    this.drawSmoke(ctx, damage, fade * alpha);
+  }
+
+  /** The submarine hull: dark, low, with a conning tower and periscope. */
+  private drawSub(ctx: CanvasRenderingContext2D, l: number, w: number) {
+    // Capsule hull, pointed bow at +x.
+    ctx.beginPath();
+    ctx.moveTo(l / 2, 0);
+    ctx.quadraticCurveTo(l / 2 - 6, -w / 2, 0, -w / 2);
+    ctx.lineTo(-l / 2 + 7, -w / 2);
+    ctx.quadraticCurveTo(-l / 2, -w / 2, -l / 2, 0);
+    ctx.quadraticCurveTo(-l / 2, w / 2, -l / 2 + 7, w / 2);
+    ctx.lineTo(0, w / 2);
+    ctx.quadraticCurveTo(l / 2 - 6, w / 2, l / 2, 0);
+    ctx.closePath();
+    ctx.fillStyle = this.hullColor;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Darker spine stripe.
+    ctx.beginPath();
+    ctx.moveTo(l / 2 - 8, 0);
+    ctx.lineTo(-l / 2 + 6, 0);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Conning tower amidships.
+    ctx.beginPath();
+    ctx.rect(-5, -w * 0.42, 13, w * 0.84);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.32)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Periscope poking forward from the tower.
+    ctx.beginPath();
+    ctx.moveTo(6, 0);
+    ctx.lineTo(13, 0);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+  }
+
+  private drawSmoke(ctx: CanvasRenderingContext2D, damage: number, fade: number) {
     // Smoke billows once the ship is badly hurt — drawn in world space so it
     // drifts the same way whatever the heading. It's the headline damage
     // signal, so it's big, dark, and hard to miss.
-    if (damage >= 0.4 && this.health > 0) {
-      const t = performance.now() / 1000;
-      const critical = damage >= 0.7;
-      const puffs = critical ? 6 : 3;
-      ctx.save();
-      for (let i = 0; i < puffs; i++) {
-        const phase = (t * 0.5 + i / puffs + jitter(this.scarSeed, i + 9)) % 1;
-        const px = this.x + Math.sin(t * 1.3 + i * 2.6 + this.scarSeed) * 6 + (i - puffs / 2) * 4;
-        const py = this.y - 8 - phase * 40;
-        const r = 4 + phase * 11;
-        const a = (1 - phase) * (critical ? 0.6 : 0.45) * fade;
-        // dark core with a lighter rim so it reads on the blue sea
-        ctx.beginPath();
-        ctx.arc(px, py, r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(35, 32, 30, ${a})`;
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(px - r * 0.25, py - r * 0.25, r * 0.55, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(120, 115, 110, ${a * 0.8})`;
-        ctx.fill();
-      }
-      ctx.restore();
+    if (damage < 0.4 || this.health <= 0) return;
+    const t = performance.now() / 1000;
+    const critical = damage >= 0.7;
+    const puffs = critical ? 6 : 3;
+    ctx.save();
+    for (let i = 0; i < puffs; i++) {
+      const phase = (t * 0.5 + i / puffs + jitter(this.scarSeed, i + 9)) % 1;
+      const px = this.x + Math.sin(t * 1.3 + i * 2.6 + this.scarSeed) * 6 + (i - puffs / 2) * 4;
+      const py = this.y - 8 - phase * 40;
+      const r = 4 + phase * 11;
+      const a = (1 - phase) * (critical ? 0.6 : 0.45) * fade;
+      // dark core with a lighter rim so it reads on the blue sea
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(35, 32, 30, ${a})`;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(px - r * 0.25, py - r * 0.25, r * 0.55, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(120, 115, 110, ${a * 0.8})`;
+      ctx.fill();
     }
+    ctx.restore();
   }
 }

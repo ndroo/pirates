@@ -82,6 +82,14 @@ canvas {
   font-size: 22px;
 }
 
+#tc-dive {
+  right: calc(190px + env(safe-area-inset-right));
+  width: 56px;
+  height: 56px;
+  bottom: calc(102px + env(safe-area-inset-bottom));
+  font-size: 20px;
+}
+
 #tc-mode.active,
 #tc-sail.active {
   background: rgba(63, 122, 38, 0.6);

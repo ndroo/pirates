@@ -57,6 +57,9 @@ const AUTO_PICK_AFTER = 10; // s on a rematch select before your last ship is re
 const WAKE_LIFE = 1100; // ms a foam-trail puff lingers before fading out
 const WAKE_GAP = 7; // px the stern must travel before a new puff is laid
 
+const DIVE_TIME = 3; // s for a submarine to fully dive or surface
+const GHOST_DIVE = 0.5; // dive past this and the sub is unseen, untargetable, intangible
+
 /** A floating barrel bomb. Lives until contact, its fuse, or a cannonball. */
 interface Mine {
   x: number;
@@ -91,13 +94,22 @@ const SELECT_KEYS: Record<string, ShipTypeName> = {
   Digit1: 'small',
   Digit2: 'medium',
   Digit3: 'large',
+  Digit4: 'sub',
 };
 
 const SPEED_LABELS: Record<ShipTypeName, string> = {
   small: 'fast',
   medium: 'steady',
   large: 'slow',
+  sub: 'diving',
 };
+
+const SELECT_SPACING = 200; // px between ship cards on the select screen
+
+/** A submerged submarine — unseen, untargetable, and intangible to others. */
+function isGhost(ship: Ship | null | undefined): boolean {
+  return !!ship && ship.type === 'sub' && ship.dive >= GHOST_DIVE;
+}
 
 interface Wave {
   x: number;
@@ -209,7 +221,7 @@ interface Slot {
   ai: boolean;
   pick: ShipTypeName | null;
   ship: Ship | null;
-  input: { turn: Turn; fire: boolean; drop: boolean; restart: boolean; sail: boolean }; // latest remote keys
+  input: { turn: Turn; fire: boolean; drop: boolean; restart: boolean; sail: boolean; dive: boolean }; // latest remote keys
   score: number; // ships sunk (respawn mode)
   mineCool: number; // s until the next barrel is ready
   fireMode: FireMode;
@@ -227,7 +239,7 @@ function newSlot(id: number, name = '', ai = false): Slot {
     ai,
     pick: null,
     ship: null,
-    input: { turn: 0, fire: false, drop: false, restart: false, sail: false },
+    input: { turn: 0, fire: false, drop: false, restart: false, sail: false, dive: false },
     score: 0,
     mineCool: 0,
     fireMode: 'volley',
@@ -265,8 +277,10 @@ export class Game {
   private chats: ChatLine[] = []; // recent banter, for the feed and bubbles
   private myFireMode: FireMode = loadFireMode();
   private prevKeyF = false; // edge detection for the fire-mode toggle
-  private myFurled = false; // this player's sails-down toggle
+  private myFurled = false; // this player's sails-down / engine-off toggle
   private prevKeyW = false; // edge detection for the sail toggle
+  private myDive = false; // this player's dive toggle (submarine)
+  private prevKeyE = false; // edge detection for the dive toggle
   private wakes = new Map<number, { x: number; y: number; born: number }[]>(); // foam trails per slot
   private lastPick: ShipTypeName | null = null; // previous round's ship
   private autoPickAt: number | null = null; // ms epoch when lastPick is auto-used
@@ -282,6 +296,7 @@ export class Game {
   private kicked = false;
   private tapRestart = false; // tap-on-game-over stands in for the R key
   private boardToggle = false; // mobile scoreboard button held open
+  private careerScore = new Map<number, number>(); // sinks accumulated over all rounds this session
 
   constructor(ctx: CanvasRenderingContext2D, input: Input, mode: GameMode = { kind: 'solo' }) {
     this.ctx = ctx;
@@ -327,9 +342,10 @@ export class Game {
     const y = ((e.clientY - rect.top) / rect.height) * WORLD_H;
 
     if (this.phase === 'select' && !this.myPick) {
-      (Object.keys(SHIP_TYPES) as ShipTypeName[]).forEach((type, i) => {
-        const cx = WORLD_W / 2 + (i - 1) * 230;
-        if (Math.abs(x - cx) < 105 && Math.abs(y - WORLD_H * 0.5) < 110) this.pick(type);
+      const types = Object.keys(SHIP_TYPES) as ShipTypeName[];
+      types.forEach((type, i) => {
+        const cx = WORLD_W / 2 + (i - (types.length - 1) / 2) * SELECT_SPACING;
+        if (Math.abs(x - cx) < SELECT_SPACING / 2 - 4 && Math.abs(y - WORLD_H * 0.5) < 100) this.pick(type);
       });
     } else if (this.phase === 'battle' && this.over) {
       this.tapRestart = true;
@@ -429,7 +445,7 @@ export class Game {
       }
       // Picked while the round-over banner is up: they sail next round.
     } else if (msg.t === 'input') {
-      slot.input = { turn: msg.turn, fire: msg.fire, drop: msg.drop, restart: msg.restart, sail: msg.sail };
+      slot.input = { turn: msg.turn, fire: msg.fire, drop: msg.drop, restart: msg.restart, sail: msg.sail, dive: msg.dive };
       slot.fireMode = msg.mode;
     } else if (msg.t === 'chat') {
       const text = cleanChat(msg.text);
@@ -611,6 +627,7 @@ export class Game {
     ship.health = snap.health;
     ship.sinkProgress = snap.sink;
     ship.sailsDown = snap.sail;
+    ship.dive = snap.dive;
   }
 
   /** Host: a guest's connection dropped. */
@@ -634,6 +651,11 @@ export class Game {
   }
 
   private resetToSelect() {
+    // Bank the round's sinks into each player's running session total before
+    // the slots are rebuilt, so the scoreboard tracks a career score.
+    for (const slot of this.slots) {
+      if (slot.score) this.careerScore.set(slot.id, (this.careerScore.get(slot.id) ?? 0) + slot.score);
+    }
     this.phase = 'select';
     // Rematch convenience: your previous ship sails again unless you pick
     // another within the countdown.
@@ -849,8 +871,15 @@ export class Game {
    * self slot's state in lockstep with the HUD so they never disagree. */
   private enterBattleFireMode() {
     this.myFurled = false;
+    this.myDive = false; // submarines start surfaced
     const self = this.selfSlot;
     if (self) self.fireMode = this.myFireMode;
+  }
+
+  /** Dive or surface the submarine (E key / dive button). */
+  toggleDive(): boolean {
+    if (this.phase === 'battle') this.myDive = !this.myDive;
+    return this.myDive;
   }
 
   /**
@@ -947,7 +976,7 @@ export class Game {
     let bestDist = Infinity;
     for (const slot of this.slots) {
       const other = slot.ship;
-      if (!other || other === ship || !other.alive) continue;
+      if (!other || other === ship || !other.alive || isGhost(other)) continue; // can't target a submerged sub
       const d = Math.hypot(other.x - ship.x, other.y - ship.y);
       if (d < bestDist) {
         bestDist = d;
@@ -997,6 +1026,10 @@ export class Game {
     if (keyW && !this.prevKeyW) this.toggleSails();
     this.prevKeyW = keyW;
 
+    const keyE = this.input.isDown('KeyE');
+    if (keyE && !this.prevKeyE) this.toggleDive();
+    this.prevKeyE = keyE;
+
     let turn: Turn = 0;
     if (this.input.isDown('ArrowLeft') || this.input.isDown('KeyA')) turn = -1;
     if (this.input.isDown('ArrowRight') || this.input.isDown('KeyD')) turn = 1;
@@ -1010,6 +1043,7 @@ export class Game {
         restart: this.over && (this.input.isDown('KeyR') || this.tapRestart),
         mode: this.myFireMode,
         sail: this.myFurled,
+        dive: this.myDive,
       });
       // The host simulates; we just animate our local effects.
       for (const ex of this.explosions) ex.update(dt);
@@ -1043,11 +1077,13 @@ export class Game {
       let fire = false;
       let drop = false;
       let sailsDown = false;
+      let diving = false;
       if (slot.id === this.selfId) {
         shipTurn = turn;
         fire = this.input.isDown('Space');
         drop = this.input.isDown('KeyS') || this.input.isDown('ArrowDown');
         sailsDown = this.myFurled;
+        diving = this.myDive;
       } else if (slot.ai) {
         const target = this.nearestEnemy(ship);
         shipTurn = this.aiTurn(slot, ship, target);
@@ -1057,13 +1093,20 @@ export class Game {
         fire = slot.input.fire;
         drop = slot.input.drop;
         sailsDown = slot.input.sail;
+        diving = slot.input.dive;
       }
 
       ship.update(dt, shipTurn, WORLD_W, WORLD_H, this.windVec, sailsDown);
 
-      // Running into an island — or its solid wooden pier — sinks the ship
-      // outright (no scorer).
-      if (ship.alive) {
+      // Submarines slide between surfaced (0) and submerged (1) over DIVE_TIME.
+      if (ship.type === 'sub') {
+        const target = diving ? 1 : 0;
+        ship.dive = Math.max(0, Math.min(1, ship.dive + Math.sign(target - ship.dive) * (dt / DIVE_TIME)));
+      }
+
+      // A submerged sub glides beneath all surface hazards; everyone else that
+      // hits an island — or its solid wooden pier — sinks outright (no scorer).
+      if (ship.alive && !isGhost(ship)) {
         for (const isl of this.islands) {
           const hitLand = Math.hypot(ship.x - isl.x, ship.y - isl.y) < isl.r + ship.width / 2;
           const hitPier = this.pierDist(ship.x, ship.y, isl) < Game.PIER_HALF_W + ship.width / 2;
@@ -1079,7 +1122,7 @@ export class Game {
       // Scraping an iceberg's submerged bulk gouges a chunk of health — but
       // a few seconds' immunity stops it grinding you down every frame. The
       // collision also splinters the berg, which can shatter it outright.
-      if (ship.alive && ship.bergSafe <= 0) {
+      if (ship.alive && !isGhost(ship) && ship.bergSafe <= 0) {
         for (const berg of this.icebergs) {
           if (Math.hypot(ship.x - berg.x, ship.y - berg.y) < berg.r + ship.width / 2) {
             const dmg = Math.max(1, Math.ceil(ship.maxHealth * ICEBERG_DAMAGE_FRAC));
@@ -1093,7 +1136,9 @@ export class Game {
 
       const firePressed = fire && !slot.prevFire;
       slot.prevFire = fire;
-      if (!this.over && ship.alive) {
+      // A submarine can only fire (and lay mines) while fully surfaced.
+      const armed = ship.dive === 0;
+      if (!this.over && ship.alive && armed) {
         const target = this.nearestEnemy(ship);
         if (target) {
           if (slot.fireMode === 'volley') {
@@ -1110,7 +1155,7 @@ export class Game {
 
       slot.mineCool = Math.max(0, slot.mineCool - dt);
       const hasMineAfloat = this.mines.some((m) => m.ownerId === slot.id && !m.spent);
-      if (!this.over && drop && ship.alive && slot.mineCool <= 0 && !hasMineAfloat) {
+      if (!this.over && drop && ship.alive && armed && slot.mineCool <= 0 && !hasMineAfloat) {
         this.mines.push({
           x: ship.x - Math.cos(ship.heading) * (ship.length / 2 + 14), // off the stern
           y: ship.y - Math.sin(ship.heading) * (ship.length / 2 + 14),
@@ -1181,7 +1226,7 @@ export class Game {
       if (ball.spent) continue;
       for (const slot of this.slots) {
         const target = slot.ship;
-        if (!target || slot.id === ball.ownerId || !target.alive) continue;
+        if (!target || slot.id === ball.ownerId || !target.alive || isGhost(target)) continue; // shots pass over a submerged sub
         if (target.containsPoint(ball.x, ball.y)) {
           ball.spent = true;
           target.takeHit();
@@ -1216,6 +1261,7 @@ export class Game {
           guns: s.ship!.gunReload,
           mineCool: s.mineCool,
           sail: s.ship!.sailsDown,
+          dive: s.ship!.dive,
         })),
         balls: this.cannonballs.map((b) => ({ x: b.x, y: b.y, p: b.p })),
         mines: this.mineSnaps(),
@@ -1242,7 +1288,8 @@ export class Game {
     const self = this.selfSlot;
     if (self) self.pick = type;
     if (this.mode.kind === 'solo') {
-      const types = Object.keys(SHIP_TYPES) as ShipTypeName[];
+      // The AI sails surface ships only (it can't work a submarine).
+      const types = (Object.keys(SHIP_TYPES) as ShipTypeName[]).filter((t) => t !== 'sub');
       this.slots.find((s) => s.ai)!.pick = types[Math.floor(Math.random() * types.length)];
     }
     this.broadcastPicked();
@@ -1258,13 +1305,13 @@ export class Game {
     if (this.over) return;
     for (const attacker of this.slots) {
       const ram = attacker.ship;
-      if (!ram?.alive) continue;
+      if (!ram?.alive || isGhost(ram)) continue; // a submerged sub glides past, ramming nothing
       const bowX = ram.x + (Math.cos(ram.heading) * ram.length) / 2;
       const bowY = ram.y + (Math.sin(ram.heading) * ram.length) / 2;
       for (const victim of this.slots) {
         if (victim === attacker) continue;
         const hull = victim.ship;
-        if (!hull?.alive || hull.ramSafe > 0 || !hull.containsPoint(bowX, bowY)) continue;
+        if (!hull?.alive || isGhost(hull) || hull.ramSafe > 0 || !hull.containsPoint(bowX, bowY)) continue;
         hull.ramSafe = RAM_SAFE;
         const dmg = Math.ceil(hull.maxHealth / 2);
         for (let i = 0; i < dmg; i++) hull.takeHit();
@@ -1304,7 +1351,7 @@ export class Game {
       if (this.over) continue;
       for (const slot of this.slots) {
         const ship = slot.ship;
-        if (!ship?.alive) continue;
+        if (!ship?.alive || isGhost(ship)) continue; // a submerged sub floats under the barrels
         // The dropper gets a brief grace so they don't blow themselves up while
         // sailing clear; everyone else triggers it on contact immediately.
         if (slot.id === mine.ownerId && mine.age < MINE_OWNER_GRACE) continue;
@@ -1370,7 +1417,7 @@ export class Game {
   private detonate(mine: Mine, radius: number) {
     for (const slot of this.slots) {
       const ship = slot.ship;
-      if (!ship?.alive) continue;
+      if (!ship?.alive || isGhost(ship)) continue; // the blast doesn't reach a submerged sub
       if (Math.hypot(ship.x - mine.x, ship.y - mine.y) > radius + ship.width / 2) continue;
       for (let i = 0; i < MINE_DAMAGE; i++) ship.takeHit();
       if (!ship.alive && slot.id !== mine.ownerId) {
@@ -1444,7 +1491,7 @@ export class Game {
       } else {
         for (const ball of this.cannonballs) ball.draw(ctx);
       }
-      for (const slot of this.slots) slot.ship?.draw(ctx);
+      for (const slot of this.slots) this.drawSlotShip(slot);
       for (const slot of this.slots) this.drawShipTag(slot);
       for (const ex of this.explosions) ex.draw(ctx);
       this.drawChatBubbles();
@@ -1470,6 +1517,21 @@ export class Game {
     if (this.disconnected) this.drawDisconnected();
   }
 
+  /** Draw a slot's ship, hiding/fading a diving submarine appropriately. */
+  private drawSlotShip(slot: Slot) {
+    const ship = slot.ship;
+    if (!ship) return;
+    if (ship.type === 'sub' && ship.dive > 0) {
+      const mine = slot.id === this.selfId;
+      if (!mine && isGhost(ship)) return; // others can't see a submerged sub at all
+      // Fade as it goes under; the owner keeps a faint trace of their own boat.
+      const alpha = mine ? Math.max(0.3, 1 - ship.dive) : 1 - ship.dive;
+      ship.draw(this.ctx, alpha);
+    } else {
+      ship.draw(this.ctx);
+    }
+  }
+
   private slotLabel(slot: Slot): string {
     if (slot.id === this.selfId) return 'You';
     if (slot.ai) return 'Enemy';
@@ -1480,6 +1542,7 @@ export class Game {
   private drawShipTag(slot: Slot) {
     const ship = slot.ship;
     if (!ship || !ship.alive || this.slots.length <= 2) return;
+    if (isGhost(ship) && slot.id !== this.selfId) return; // no tag floats over a hidden sub
     const ctx = this.ctx;
     ctx.font = 'bold 12px system-ui, sans-serif';
     ctx.textAlign = 'center';
@@ -1563,40 +1626,53 @@ export class Game {
     const huts = 1 + Math.floor(jitter(seed, 51) * 2); // 1–2 huts
     for (let i = 0; i < huts; i++) {
       const a = jitter(seed, 60 + i) * Math.PI * 2;
-      const rad = isl.r * (0.12 + jitter(seed, 70 + i) * 0.28);
+      const rad = isl.r * (0.1 + jitter(seed, 70 + i) * 0.22);
       const x = isl.x + Math.cos(a) * rad;
       const y = isl.y + Math.sin(a) * rad;
-      const s = 4 + jitter(seed, 80 + i) * 2;
+      const s = 9 + jitter(seed, 80 + i) * 5; // 9–14px
+      const roof = s * 0.75;
       // wall
       ctx.fillStyle = '#b07a44';
       ctx.fillRect(x - s / 2, y - s / 2, s, s);
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-      ctx.lineWidth = 0.6;
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.lineWidth = 1;
       ctx.strokeRect(x - s / 2, y - s / 2, s, s);
+      // little door
+      ctx.fillStyle = '#5a3b22';
+      ctx.fillRect(x - s * 0.12, y, s * 0.24, s / 2);
       // roof
       ctx.beginPath();
-      ctx.moveTo(x - s / 2 - 1, y - s / 2);
-      ctx.lineTo(x, y - s / 2 - s * 0.7);
-      ctx.lineTo(x + s / 2 + 1, y - s / 2);
+      ctx.moveTo(x - s / 2 - 2, y - s / 2);
+      ctx.lineTo(x, y - s / 2 - roof);
+      ctx.lineTo(x + s / 2 + 2, y - s / 2);
       ctx.closePath();
       ctx.fillStyle = '#7a3b2a';
       ctx.fill();
       ctx.stroke();
     }
     // A lighthouse crowns large, settled islands.
-    if (isl.r > 55 && jitter(seed, 90) > 0.4) {
+    if (isl.r > 50 && jitter(seed, 90) > 0.4) {
       const x = isl.x;
       const y = isl.y - isl.r * 0.1;
+      const hgt = 22;
+      const wid = 9;
       ctx.fillStyle = '#eee';
-      ctx.fillRect(x - 2.5, y - 12, 5, 12);
+      ctx.fillRect(x - wid / 2, y - hgt, wid, hgt);
       ctx.fillStyle = '#c0392b';
-      ctx.fillRect(x - 2.5, y - 9, 5, 2.5);
-      ctx.fillRect(x - 2.5, y - 4, 5, 2.5);
+      ctx.fillRect(x - wid / 2, y - hgt * 0.78, wid, 4);
+      ctx.fillRect(x - wid / 2, y - hgt * 0.45, wid, 4);
       ctx.fillStyle = '#ffd75e'; // lit lantern room
-      ctx.fillRect(x - 1.8, y - 14, 3.6, 2.6);
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-      ctx.lineWidth = 0.6;
-      ctx.strokeRect(x - 2.5, y - 12, 5, 12);
+      ctx.fillRect(x - wid / 2 + 1, y - hgt - 5, wid - 2, 5);
+      ctx.fillStyle = '#3a3a3a'; // lantern roof
+      ctx.beginPath();
+      ctx.moveTo(x - wid / 2, y - hgt - 5);
+      ctx.lineTo(x, y - hgt - 11);
+      ctx.lineTo(x + wid / 2, y - hgt - 5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x - wid / 2, y - hgt, wid, hgt);
     }
   }
 
@@ -1852,18 +1928,22 @@ export class Game {
     const types = Object.keys(SHIP_TYPES) as ShipTypeName[];
     types.forEach((type, i) => {
       const stats = SHIP_TYPES[type];
-      const x = w / 2 + (i - 1) * 230;
+      const x = w / 2 + (i - (types.length - 1) / 2) * SELECT_SPACING;
       const y = h * 0.5;
 
       new Ship(x, y, -Math.PI / 2, color, type).draw(ctx);
 
       ctx.fillStyle = '#fff';
       ctx.textAlign = 'center';
-      ctx.font = 'bold 20px system-ui, sans-serif';
+      ctx.font = 'bold 19px system-ui, sans-serif';
       ctx.fillText(`${i + 1} — ${type[0].toUpperCase()}${type.slice(1)}`, x, y + 70);
-      ctx.font = '15px system-ui, sans-serif';
+      ctx.font = '14px system-ui, sans-serif';
       ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-      ctx.fillText(`${stats.guns} guns · ${SPEED_LABELS[type]} · ${stats.maxHealth} hits to sink`, x, y + 94);
+      const blurb =
+        type === 'sub'
+          ? `${stats.guns} guns · dives · ${stats.maxHealth} hits`
+          : `${stats.guns} guns · ${SPEED_LABELS[type]} · ${stats.maxHealth} hits`;
+      ctx.fillText(blurb, x, y + 92);
     });
 
     // Rematch countdown: the previous ship is reused unless they repick.
@@ -1887,7 +1967,7 @@ export class Game {
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
     ctx.font = '17px system-ui, sans-serif';
-    const howToPick = TOUCH ? 'Tap a ship to choose it' : 'Press 1, 2 or 3 to choose your ship';
+    const howToPick = TOUCH ? 'Tap a ship to choose it' : 'Press 1–4 to choose your ship';
     if (this.mode.kind === 'solo') {
       ctx.fillText(`${howToPick} — the enemy ship is chosen at random`, w / 2, h * 0.82);
       return;
@@ -2039,7 +2119,8 @@ export class Game {
     if (!ship) return;
     const ctx = this.ctx;
     const cx = WORLD_W / 2;
-    const y0 = WORLD_H - 40;
+    // Subs need an extra status line, so lift the whole stack to make room.
+    const y0 = WORLD_H - (ship.type === 'sub' ? 56 : 42);
     const segW = 26;
     const gap = 4;
 
@@ -2072,10 +2153,23 @@ export class Game {
     ctx.fillStyle = mineFrac >= 1 ? '#e8742c' : 'rgba(232, 116, 44, 0.55)';
     ctx.fillRect(x0, y0 + 16, totalW * mineFrac, 10);
 
-    // Sail state, just under the bars.
+    // Propulsion + (for subs) dive state, just under the bars.
     ctx.textAlign = 'center';
-    ctx.fillStyle = this.myFurled ? '#ffd75e' : 'rgba(255, 255, 255, 0.7)';
-    ctx.fillText(this.myFurled ? '⛵ Sails furled — drifting (W)' : '⛵ Sails set (W)', cx, y0 + 34);
+    if (ship.type === 'sub') {
+      ctx.fillStyle = this.myFurled ? '#ff9d5e' : 'rgba(255, 255, 255, 0.7)';
+      ctx.fillText(this.myFurled ? '⚙ Engine off — drifting (W)' : '⚙ Engine on (W)', cx, y0 + 34);
+      let ds: string;
+      let lit = false;
+      if (ship.dive <= 0) ds = '🔼 Surfaced — guns ready · dive (E)';
+      else if (ship.dive >= 1) { ds = '🌊 Submerged — hidden · surface (E)'; lit = true; }
+      else if (this.myDive) { ds = '⬇ Diving…'; lit = true; }
+      else ds = '⬆ Surfacing…';
+      ctx.fillStyle = lit ? '#5ec8ff' : 'rgba(255, 255, 255, 0.8)';
+      ctx.fillText(ds, cx, y0 + 50);
+    } else {
+      ctx.fillStyle = this.myFurled ? '#ffd75e' : 'rgba(255, 255, 255, 0.7)';
+      ctx.fillText(this.myFurled ? '⛵ Sails furled — drifting (W)' : '⛵ Sails set (W)', cx, y0 + 34);
+    }
   }
 
   /** Wind dial top-center: an arrow pointing where the wind blows, plus strength. */
@@ -2141,10 +2235,11 @@ export class Game {
     ctx.fillStyle = final ? 'rgba(6, 18, 32, 0.82)' : 'rgba(6, 18, 32, 0.62)';
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
 
+    const career = (s: Slot) => (this.careerScore.get(s.id) ?? 0) + s.score;
     const ranked = this.slots
       .filter((s) => s.ship || s.score > 0 || !s.left)
       .slice()
-      .sort((a, b) => b.score - a.score || (b.ship?.alive ? 1 : 0) - (a.ship?.alive ? 1 : 0));
+      .sort((a, b) => career(b) - career(a) || (b.ship?.alive ? 1 : 0) - (a.ship?.alive ? 1 : 0));
 
     const rowH = 30;
     const listH = Math.max(ranked.length, 1) * rowH;
@@ -2164,11 +2259,10 @@ export class Game {
       else title = `${this.slotLabel(w)} wins!`;
     }
     ctx.fillText(title, WORLD_W / 2, top - 54);
-    if (this.battleMode === 'respawn') {
-      ctx.font = '16px system-ui, sans-serif';
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
-      ctx.fillText(`First to ${this.target} sinks`, WORLD_W / 2, top - 26);
-    }
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
+    const sub = this.battleMode === 'respawn' ? `First to ${this.target} this round · career totals below` : 'Career totals across all rounds';
+    ctx.fillText(sub, WORLD_W / 2, top - 26);
 
     // Rows.
     const left = WORLD_W / 2 - 250;
@@ -2190,11 +2284,18 @@ export class Game {
       ctx.textAlign = 'right';
       ctx.font = me ? 'bold 17px system-ui, sans-serif' : '17px system-ui, sans-serif';
       ctx.fillStyle = '#fff';
-      ctx.fillText(`${slot.score} sunk`, left + 420, y);
+      ctx.fillText(`${career(slot)} sunk`, left + 400, y);
+      // Show this round's contribution when it adds to a prior total.
+      const prior = this.careerScore.get(slot.id) ?? 0;
+      if (prior > 0 && slot.score > 0) {
+        ctx.font = '12px system-ui, sans-serif';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+        ctx.fillText(`+${slot.score}`, left + 446, y);
+      }
       ctx.textAlign = 'left';
       ctx.font = '14px system-ui, sans-serif';
       ctx.fillStyle = slot.ship?.alive ? 'rgba(120, 220, 120, 0.9)' : 'rgba(255, 120, 120, 0.85)';
-      ctx.fillText(slot.ship?.alive ? 'afloat' : 'sunk', left + 442, y);
+      ctx.fillText(slot.ship?.alive ? 'afloat' : 'sunk', left + 470, y);
     });
 
     if (final) {

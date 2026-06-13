@@ -17,8 +17,9 @@ over the internet with serverless peer-to-peer multiplayer.
 - **Join** — open an invite link or enter the room code, optionally with a
   display name (shown in the waiting room, HUD, ship tags, and win banner).
 
-The host gets an in-game **⚙ Host panel**: switch rules mid-battle
-(effective immediately for everyone) and kick players — kicked players see a
+The host gets an in-game **⚙ Host panel**: pause/resume the battle (or press
+`P`) — everyone freezes and sees a "Paused" overlay — switch rules mid-battle
+(effective immediately for everyone), and kick players — kicked players see a
 notice and their ship sinks in place. The waiting room has kick buttons too.
 
 A host page refresh does **not** kill the room: the room (code + settings) is
@@ -107,13 +108,23 @@ chosen at random each battle. All type stats live in one table
 - Two fire modes (`F`): a full **broadside volley** once every gun is loaded,
   or **rolling fire** — one gun per press, each gun reloading independently.
   Recharge bars for the guns and the barrel sit bottom-center.
-- **Barrel mines** (`S`): one afloat at a time, 10s recharge. They arm after
-  1.5s, drift with the wind, and deal 2 damage on contact — to anyone,
-  including the dropper. Each barrel rolls a 10–20s fuse: most self-detonate
-  with an area blast; ~25% are duds that fizzle out. Cannonballs detonate
-  them harmlessly.
+- **Barrel mines** (`S`): one afloat at a time, 10s recharge. They arm the
+  instant they hit the water (so you can drop one to stop a chaser), drift
+  with the wind, and deal 2 damage on contact — to anyone, including the
+  dropper, who gets a brief grace to flee their own barrel. Each rolls a
+  10–20s fuse: most self-detonate with an area blast; ~25% are duds that
+  fizzle out. Cannonballs detonate them harmlessly.
 - **Ramming**: burying your bow in another hull costs them half their max
   health (a short immunity stops one collision from landing twice).
+- **Icebergs** appear some rounds: only a small tip shows above the surface,
+  but the submerged bulk has a much larger strike radius (Titanic-style), so
+  you can run into one well before it looks close. A scrape gouges ~40% of
+  your max health rather than sinking you outright, with a few seconds'
+  immunity to sail clear.
+- Some islands sport a **wooden pier**; cannonballs and ships still treat the
+  island as its circular landmass.
+- Drifting **clouds** float downwind across the arena, dimming the view of
+  whatever passes beneath them (the HUD stays clear).
 - Cannonballs fly a visible ballistic arc and splash where they land; badly
   hurt ships scorch, tatter, and pour smoke.
 - **Banter** (`Enter`): messages relay through the host and appear as speech

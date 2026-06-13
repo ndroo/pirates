@@ -40,6 +40,7 @@ export class Ship {
   guns: number;
   gunReload: number[]; // s until each gun is ready again
   ramSafe = 0; // s of immunity left after being rammed
+  bergSafe = 0; // s of immunity left after scraping an iceberg
   sinkProgress = 0; // 0 afloat → 1 fully sunk
 
   readonly type: ShipTypeName;
@@ -91,6 +92,7 @@ export class Ship {
       this.gunReload[i] = Math.max(0, this.gunReload[i] - dt);
     }
     this.ramSafe = Math.max(0, this.ramSafe - dt);
+    this.bergSafe = Math.max(0, this.bergSafe - dt);
 
     if (!this.alive) {
       this.sinkProgress = Math.min(1, this.sinkProgress + dt / SINK_DURATION);

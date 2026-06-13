@@ -370,6 +370,26 @@ canvas {
   border: none;
 }
 
+#panel-pause {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 8px;
+  border: none;
+  border-radius: 6px;
+  background: #2f6b8c;
+  color: #fff;
+  cursor: pointer;
+}
+
+#panel-pause:hover {
+  background: #3a7ea4;
+}
+
+#panel-pause.active {
+  background: #3f7a26;
+}
+
 #lobby-status {
   min-height: 2.5em;
   margin: 4px 0 0;

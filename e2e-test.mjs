@@ -139,19 +139,63 @@ await hold(host2, 'Digit1'); // small ships sink fast
 await hold(guest3, 'Digit1');
 await host2.waitForTimeout(500);
 
-// Islands and wind: same on both screens.
-const hostIslands = await host2.evaluate(() => window.__game.islands);
-const guestIslands = await guest3.evaluate(() => window.__game.islands);
-if (!hostIslands.length || JSON.stringify(hostIslands) !== JSON.stringify(guestIslands)) {
-  throw new Error(`island mismatch: host ${JSON.stringify(hostIslands)} guest ${JSON.stringify(guestIslands)}`);
+// Islands and wind: same on both screens. (Normalize pier null/undefined,
+// which the wire serializer doesn't preserve exactly but means the same.)
+const islandKey = (page) =>
+  page.evaluate(() =>
+    JSON.stringify(window.__game.islands.map((i) => [Math.round(i.x), Math.round(i.y), Math.round(i.r), i.pier == null ? -1 : Math.round(i.pier * 100)])),
+  );
+const hostIslands = await islandKey(host2);
+const guestIslands = await islandKey(guest3);
+if (hostIslands === '[]' || hostIslands !== guestIslands) {
+  throw new Error(`island mismatch: host ${hostIslands} guest ${guestIslands}`);
 }
-console.log(`islands synced (${hostIslands.length}) ✓`);
+console.log(`islands synced ✓`);
 const hostWind = await host2.evaluate(() => window.__game.wind);
 const guestWind = await guest3.evaluate(() => window.__game.wind);
 if (hostWind.strength <= 0 || JSON.stringify(hostWind) !== JSON.stringify(guestWind)) {
   throw new Error(`wind mismatch: host ${JSON.stringify(hostWind)} guest ${JSON.stringify(guestWind)}`);
 }
 console.log(`wind synced (strength ${hostWind.strength.toFixed(2)}) ✓`);
+
+// Fire mode opens in broadside (volley), label and behaviour agreeing.
+const fm = await host2.evaluate(() => ({ mode: window.__game.myFireMode, slot: window.__game.slots[0].fireMode }));
+if (fm.mode !== 'volley' || fm.slot !== 'volley') throw new Error(`battle did not open in broadside: ${JSON.stringify(fm)}`);
+console.log('battle opens in broadside ✓');
+
+// Clouds are generated and synced (immutable radii match across screens).
+const cloudR = (page) => page.evaluate(() => window.__game.clouds.map((c) => Math.round(c.r)).sort((a, b) => a - b));
+const hc = await cloudR(host2);
+const gc = await cloudR(guest3);
+if (!hc.length || JSON.stringify(hc) !== JSON.stringify(gc)) {
+  throw new Error(`cloud mismatch: host ${JSON.stringify(hc)} guest ${JSON.stringify(gc)}`);
+}
+console.log(`clouds synced (${hc.length}) ✓`);
+
+// Iceberg: scrapes off a chunk of health but does not sink outright.
+const berg = await host2.evaluate(() => {
+  const g = window.__game;
+  const ship = g.slots[0].ship;
+  ship.health = ship.maxHealth;
+  ship.bergSafe = 0;
+  g.icebergs = [{ x: ship.x, y: ship.y, r: 60 }];
+  return { max: ship.maxHealth };
+});
+await host2.waitForFunction(
+  (max) => {
+    const s = window.__game.slots[0].ship;
+    return s.health < max && s.health > 0; // damaged, not sunk
+  },
+  berg.max,
+  { timeout: 4000 },
+);
+const bergHp = await host2.evaluate(() => window.__game.slots[0].ship.health);
+console.log(`iceberg scrape: ${berg.max} → ${bergHp} HP, still afloat ✓`);
+await host2.evaluate(() => {
+  const g = window.__game;
+  g.icebergs = [];
+  g.slots[0].ship.health = g.slots[0].ship.maxHealth; // patch up for later tests
+});
 
 // Running aground must sink the ship on the spot (and respawn it, in this mode).
 await host2.evaluate(() => {
@@ -187,13 +231,17 @@ await pressUntil(host2, 'KeyF', () => window.__game.myFireMode === 'volley', 'vo
 
 // --- Barrel mines: one afloat at a time, 10s recharge, 2 damage. ---
 await pressUntil(host2, 'KeyS', () => window.__game.mines.length === 1, 'a dropped barrel');
+// Barrels are live the instant they hit the water now (to stop a chaser).
+if (!(await host2.evaluate(() => window.__game.mines[0].armed))) {
+  throw new Error('barrel did not arm immediately on drop');
+}
+console.log('barrel arms immediately on drop ✓');
 const mineCool = await host2.evaluate(() => window.__game.slots[0].mineCool);
 if (mineCool < 8) throw new Error(`mine recharge not engaged (${mineCool})`);
 await hold(host2, 'KeyS');
 if ((await host2.evaluate(() => window.__game.mines.length)) !== 1) {
   throw new Error('dropped a second barrel while one was afloat');
 }
-await host2.waitForFunction(() => window.__game.mines[0]?.armed, null, { timeout: 4000 });
 await guest3.waitForFunction(() => window.__game.remoteMines.length === 1, null, { timeout: 5000 });
 await host2.evaluate(() => {
   const g = window.__game;
@@ -240,6 +288,22 @@ await host2.fill('#chat-input', 'prepare to be boarded');
 await host2.keyboard.press('Enter');
 await guest3.waitForFunction(() => window.__game.chats.some((c) => c.from === 0), null, { timeout: 5000 });
 console.log('banter relayed both ways ✓');
+
+// --- Host pause freezes both screens; resume lets the guest's ship move again. ---
+await host2.evaluate(() => { window.__game.slots[1].ship.health = window.__game.slots[1].ship.maxHealth; });
+await guest3.keyboard.down('ArrowLeft'); // guest tries to turn while paused
+await host2.evaluate(() => window.__game.togglePause());
+await guest3.waitForFunction(() => window.__game.isPaused, null, { timeout: 5000 });
+const frozen = await guest3.evaluate(() => window.__game.slots[1].ship.heading);
+await guest3.waitForTimeout(700);
+const stillFrozen = await guest3.evaluate(() => window.__game.slots[1].ship.heading);
+if (frozen !== stillFrozen) throw new Error('guest ship moved while paused');
+console.log('host pause froze the battle on the guest ✓');
+await host2.evaluate(() => window.__game.togglePause());
+await guest3.waitForFunction(() => !window.__game.isPaused, null, { timeout: 5000 });
+await guest3.waitForFunction((h) => window.__game.slots[1].ship.heading !== h, stillFrozen, { timeout: 5000 });
+await guest3.keyboard.up('ArrowLeft');
+console.log('resume unfroze the battle ✓');
 
 await host2.keyboard.down('Space'); // both auto-aim and blast away
 await guest3.keyboard.down('Space');

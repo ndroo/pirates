@@ -5,9 +5,11 @@ import type { Input } from './input';
 import { cleanChat } from './net';
 import type {
   BattleMode,
+  Cloud,
   FireMode,
   GuestNet,
   HostNet,
+  Iceberg,
   Island,
   MineSnap,
   NetMessage,
@@ -29,15 +31,19 @@ const SINK_TARGET = 5; // respawn mode: sinks needed to win the round
 const MIN_ISLANDS = 4;
 const MAX_ISLANDS = 7;
 
-const MINE_ARM_TIME = 1.5; // s before a dropped barrel goes live
 const MINE_RADIUS = 7; // px contact radius
 const MINE_BLAST = 45; // px radius when the fuse detonates it
 const MINE_DAMAGE = 2; // health per hit (cannonballs do 1)
 const MINE_RECHARGE = 10; // s before the next barrel is ready (one afloat at a time)
 const MINE_DRIFT = 14; // px/s per unit of wind strength
 const MINE_DUD_CHANCE = 0.25; // "bad fuse": fizzles instead of self-detonating
+const MINE_OWNER_GRACE = 0.8; // s the dropper is immune, so they can flee their own armed barrel
 
 const RAM_SAFE = 1.2; // s of immunity after taking a ram, so one hit ≠ many
+
+const ICEBERG_CHANCE = 0.5; // odds any given round has icebergs at all
+const ICEBERG_DAMAGE_FRAC = 0.4; // share of max health scraped off on a strike
+const ICEBERG_SAFE = 3; // s of immunity after a scrape, long enough to sail clear
 
 const AUTO_PICK_AFTER = 10; // s on a rematch select before your last ship is reused
 
@@ -92,6 +98,12 @@ interface Wave {
 // Phones get touch controls and tap-flavored hint text.
 const TOUCH = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
 
+/** Cheap deterministic pseudo-random in [0, 1) — stable per (seed, n). */
+function jitter(seed: number, n: number): number {
+  const v = Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453;
+  return v - Math.floor(v);
+}
+
 /** One player (or the solo AI) in the match. */
 interface Slot {
   id: number; // 0 = host; shown by name, or "Player <id + 1>" if unnamed
@@ -143,6 +155,9 @@ export class Game {
   private cannonballs: Cannonball[] = [];
   private explosions: Explosion[] = [];
   private islands: Island[] = [];
+  private icebergs: Iceberg[] = [];
+  private clouds: Cloud[] = [];
+  private paused = false; // host froze the battle
   private mines: Mine[] = [];
   private remoteMines: MineSnap[] = []; // guest: mines from snapshots
   private splashes: Splash[] = [];
@@ -283,6 +298,18 @@ export class Game {
     if (this.mode.kind === 'host') this.mode.net.kick(id);
   }
 
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  /** Host: freeze or resume the battle for everyone. */
+  togglePause(): boolean {
+    if (this.mode.kind !== 'host' || this.phase !== 'battle') return this.paused;
+    this.paused = !this.paused;
+    this.mode.net.broadcast({ t: 'pause', paused: this.paused });
+    return this.paused;
+  }
+
   // --- messages ---
 
   private handleGuestMessage(id: number, msg: NetMessage) {
@@ -363,6 +390,8 @@ export class Game {
       mode: this.battleMode,
       target: this.target,
       islands: this.islands,
+      icebergs: this.icebergs,
+      clouds: this.clouds,
       wind: this.wind,
       mines: this.mineSnaps(),
       ships: this.slots
@@ -387,6 +416,9 @@ export class Game {
         this.kicked = true;
         this.disconnected = true;
         break;
+      case 'pause':
+        this.paused = msg.paused;
+        break;
       case 'chat': {
         const text = cleanChat(msg.text);
         if (text) this.recordChat(msg.from ?? -1, text);
@@ -405,8 +437,12 @@ export class Game {
           return slot;
         });
         this.islands = msg.islands;
+        this.icebergs = msg.icebergs;
+        this.clouds = msg.clouds;
         this.wind = msg.wind;
         this.remoteMines = msg.mines;
+        this.paused = false;
+        this.enterBattleFireMode();
         this.cannonballs = [];
         this.remoteBalls = [];
         this.explosions = [];
@@ -482,6 +518,9 @@ export class Game {
     this.remoteMines = [];
     this.splashes = [];
     this.pendingSplash = [];
+    this.icebergs = [];
+    this.clouds = [];
+    this.paused = false;
     this.buildSlots();
     if (this.mode.kind === 'host') {
       this.mode.net.broadcast({ t: 'go-select' });
@@ -529,16 +568,76 @@ export class Game {
     const count = MIN_ISLANDS + Math.floor(Math.random() * (MAX_ISLANDS - MIN_ISLANDS + 1));
     for (let tries = 0; islands.length < count && tries < 400; tries++) {
       const r = 35 + Math.random() * 40;
-      const candidate = {
+      const candidate: Island = {
         x: r + 20 + Math.random() * (WORLD_W - 2 * r - 40),
         y: r + 20 + Math.random() * (WORLD_H - 2 * r - 40),
         r,
+        // Roughly 45% of islands sport a wooden pier at a random bearing.
+        pier: Math.random() < 0.45 ? Math.random() * Math.PI * 2 : undefined,
       };
       if (ring.some((p) => Math.hypot(p.x - candidate.x, p.y - candidate.y) < r + 55)) continue;
       if (islands.some((i) => Math.hypot(i.x - candidate.x, i.y - candidate.y) < i.r + r + 100)) continue;
       islands.push(candidate);
     }
     return islands;
+  }
+
+  /**
+   * Icebergs only appear some rounds. They keep clear of the spawn ring and of
+   * islands; their `r` is the big submerged danger zone, far larger than the
+   * tip that shows above water.
+   */
+  private makeIcebergs(): Iceberg[] {
+    if (Math.random() > ICEBERG_CHANCE) return [];
+    const bergs: Iceberg[] = [];
+    const count = 1 + Math.floor(Math.random() * 3); // 1–3
+    for (let tries = 0; bergs.length < count && tries < 200; tries++) {
+      const r = 40 + Math.random() * 35;
+      const candidate = {
+        x: r + 20 + Math.random() * (WORLD_W - 2 * r - 40),
+        y: r + 20 + Math.random() * (WORLD_H - 2 * r - 40),
+        r,
+      };
+      const cx = WORLD_W / 2;
+      const cy = WORLD_H / 2;
+      // Keep them off the spawn ring (within ~0.32 of the arena half-extents).
+      const ringDist = Math.hypot((candidate.x - cx) / (WORLD_W * 0.32), (candidate.y - cy) / (WORLD_H * 0.32));
+      if (Math.abs(ringDist - 1) < 0.18) continue;
+      if (this.islands.some((i) => Math.hypot(i.x - candidate.x, i.y - candidate.y) < i.r + r + 40)) continue;
+      if (bergs.some((b) => Math.hypot(b.x - candidate.x, b.y - candidate.y) < b.r + r + 60)) continue;
+      bergs.push(candidate);
+    }
+    return bergs;
+  }
+
+  /** A few translucent clouds that drift downwind across the arena. */
+  private makeClouds(): Cloud[] {
+    const clouds: Cloud[] = [];
+    const count = 2 + Math.floor(Math.random() * 3); // 2–4
+    for (let i = 0; i < count; i++) {
+      clouds.push({
+        x: Math.random() * WORLD_W,
+        y: Math.random() * WORLD_H,
+        r: 90 + Math.random() * 90,
+        speed: 14 + Math.random() * 16,
+      });
+    }
+    return clouds;
+  }
+
+  /** Advance the clouds along the wind; wrap each axis when fully off-screen. */
+  private moveClouds(dt: number) {
+    const dx = Math.cos(this.wind.dir);
+    const dy = Math.sin(this.wind.dir);
+    for (const c of this.clouds) {
+      c.x += dx * c.speed * dt;
+      c.y += dy * c.speed * dt;
+      const m = c.r + 80;
+      if (c.x < -m) c.x = WORLD_W + m;
+      if (c.x > WORLD_W + m) c.x = -m;
+      if (c.y < -m) c.y = WORLD_H + m;
+      if (c.y > WORLD_H + m) c.y = -m;
+    }
   }
 
   /** Host/solo: once everyone has picked, spawn the fleet in a ring and go. */
@@ -551,8 +650,12 @@ export class Game {
       this.spawnShip(slot, (i / n) * Math.PI * 2 - Math.PI / 2);
     });
     this.islands = this.makeIslands();
+    this.icebergs = this.makeIcebergs();
     this.wind = { dir: Math.random() * Math.PI * 2, strength: 0.08 + Math.random() * 0.32 };
+    this.clouds = this.makeClouds();
     this.mines = [];
+    this.paused = false;
+    this.enterBattleFireMode();
     for (const slot of this.slots) slot.mineCool = 0;
     this.cannonballs = [];
     this.explosions = [];
@@ -565,8 +668,10 @@ export class Game {
         mode: this.battleMode,
         target: this.target,
         islands: this.islands,
+        icebergs: this.icebergs,
+        clouds: this.clouds,
         wind: this.wind,
-      mines: this.mineSnaps(),
+        mines: this.mineSnaps(),
         ships: this.slots.map((s) => ({
           id: s.id,
           name: s.name,
@@ -577,6 +682,14 @@ export class Game {
         })),
       });
     }
+  }
+
+  /** Every battle opens in broadside (the realistic default); keep the self
+   * slot's fire mode in lockstep with the HUD label so they never disagree. */
+  private enterBattleFireMode() {
+    this.myFireMode = 'volley';
+    const self = this.selfSlot;
+    if (self) self.fireMode = 'volley';
   }
 
   /**
@@ -601,6 +714,9 @@ export class Game {
       traveled += speed * step;
       for (const isl of this.islands) {
         if (Math.hypot(x - isl.x, y - isl.y) < isl.r + ship.width / 2 + 12) return traveled;
+      }
+      for (const berg of this.icebergs) {
+        if (Math.hypot(x - berg.x, y - berg.y) < berg.r + ship.width / 2 + 12) return traveled;
       }
     }
     return Infinity;
@@ -673,11 +789,15 @@ export class Game {
       return;
     }
 
-    // The waves run with the wind — an ambient cue for its direction.
+    // Frozen by the host: hold everything where it is, the overlay does the rest.
+    if (this.paused) return;
+
+    // The waves and clouds run with the wind — an ambient cue for its direction.
     for (const wave of this.waves) {
       wave.x = (wave.x + this.windVec.x * 60 * dt + WORLD_W) % WORLD_W;
       wave.y = (wave.y + this.windVec.y * 60 * dt + WORLD_H) % WORLD_H;
     }
+    this.moveClouds(dt);
 
     const keyF = this.input.isDown('KeyF');
     if (keyF && !this.prevKeyF) this.toggleFireMode();
@@ -755,6 +875,21 @@ export class Game {
         }
       }
 
+      // Scraping an iceberg's submerged bulk gouges a chunk of health — but
+      // a few seconds' immunity stops it grinding you down every frame.
+      if (ship.alive && ship.bergSafe <= 0) {
+        for (const berg of this.icebergs) {
+          if (Math.hypot(ship.x - berg.x, ship.y - berg.y) < berg.r + ship.width / 2) {
+            const dmg = Math.max(1, Math.ceil(ship.maxHealth * ICEBERG_DAMAGE_FRAC));
+            for (let i = 0; i < dmg; i++) ship.takeHit();
+            ship.bergSafe = ICEBERG_SAFE;
+            this.explosions.push(new Explosion(ship.x, ship.y));
+            this.pendingBoom.push({ x: ship.x, y: ship.y });
+            break;
+          }
+        }
+      }
+
       const firePressed = fire && !slot.prevFire;
       slot.prevFire = fire;
       if (!this.over && ship.alive) {
@@ -782,7 +917,7 @@ export class Game {
           age: 0,
           fuse: 10 + Math.random() * 10,
           dud: Math.random() < MINE_DUD_CHANCE,
-          armed: false,
+          armed: true, // live the instant it hits the water, to stop a chaser
           spent: false,
         });
         slot.mineCool = MINE_RECHARGE;
@@ -913,7 +1048,6 @@ export class Game {
   private updateMines(dt: number) {
     for (const mine of this.mines) {
       mine.age += dt;
-      mine.armed = mine.age >= MINE_ARM_TIME;
 
       // Barrels ride the wind, but beach against islands.
       const nx = mine.x + this.windVec.x * MINE_DRIFT * dt * 4;
@@ -936,10 +1070,13 @@ export class Game {
         continue;
       }
 
-      if (!mine.armed || this.over) continue;
+      if (this.over) continue;
       for (const slot of this.slots) {
         const ship = slot.ship;
         if (!ship?.alive) continue;
+        // The dropper gets a brief grace so they don't blow themselves up while
+        // sailing clear; everyone else triggers it on contact immediately.
+        if (slot.id === mine.ownerId && mine.age < MINE_OWNER_GRACE) continue;
         if (Math.hypot(ship.x - mine.x, ship.y - mine.y) < MINE_RADIUS + ship.width / 2) {
           mine.spent = true;
           this.detonate(mine, MINE_BLAST);
@@ -1016,6 +1153,7 @@ export class Game {
     } else {
       const ctx = this.ctx;
       this.drawIslands();
+      this.drawIcebergs();
       this.drawMines();
       for (const sp of this.splashes) sp.draw(ctx);
       if (this.mode.kind === 'guest') {
@@ -1028,17 +1166,23 @@ export class Game {
       for (const ex of this.explosions) ex.draw(ctx);
       this.drawChatBubbles();
 
+      // Clouds drift above the sea and ships, dimming the view, but stay
+      // beneath the HUD so dials and bars are always readable.
+      this.drawClouds();
+
       this.slots.forEach((slot, row) => {
         if (slot.ship) this.drawHealthRow(slot, row);
       });
 
       this.drawWind();
       this.drawWeaponBars();
+      this.drawChatHint();
       this.drawRespawnNotice();
       if (this.over) this.drawGameOver();
     }
 
     this.drawChatFeed();
+    if (this.paused) this.drawPaused();
     if (this.disconnected) this.drawDisconnected();
   }
 
@@ -1093,6 +1237,11 @@ export class Game {
         ctx.closePath();
       };
 
+      // A pier juts out over the water before the sand is drawn, so the
+      // planks read as sitting on the surface. (`!= null` catches the `null`
+      // that the wire serializer turns our `undefined` into on guests.)
+      if (isl.pier != null) this.drawPier(isl);
+
       blob(isl.r);
       ctx.fillStyle = '#d9c38a'; // sand
       ctx.fill();
@@ -1104,6 +1253,145 @@ export class Game {
       ctx.fillStyle = '#4f7a3a'; // scrub on top
       ctx.fill();
     }
+  }
+
+  /** A wooden jetty extending from an island into the water. */
+  private drawPier(isl: Island) {
+    const ctx = this.ctx;
+    const a = isl.pier!;
+    const dx = Math.cos(a);
+    const dy = Math.sin(a);
+    const px = -dy; // perpendicular, for plank width
+    const py = dx;
+    const inner = isl.r * 0.5;
+    const outer = isl.r + 26 + isl.r * 0.45; // reaches out past the sand
+    const halfW = 5;
+
+    ctx.save();
+    // deck
+    ctx.beginPath();
+    ctx.moveTo(isl.x + dx * inner + px * halfW, isl.y + dy * inner + py * halfW);
+    ctx.lineTo(isl.x + dx * outer + px * halfW, isl.y + dy * outer + py * halfW);
+    ctx.lineTo(isl.x + dx * outer - px * halfW, isl.y + dy * outer - py * halfW);
+    ctx.lineTo(isl.x + dx * inner - px * halfW, isl.y + dy * inner - py * halfW);
+    ctx.closePath();
+    ctx.fillStyle = '#7a5230';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // plank seams + support posts
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
+    for (let t = 0.15; t < 1; t += 0.18) {
+      const cx = isl.x + dx * (inner + (outer - inner) * t);
+      const cy = isl.y + dy * (inner + (outer - inner) * t);
+      ctx.beginPath();
+      ctx.moveTo(cx + px * halfW, cy + py * halfW);
+      ctx.lineTo(cx - px * halfW, cy - py * halfW);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#5a3c22';
+    for (const t of [0.55, 1]) {
+      const cx = isl.x + dx * (inner + (outer - inner) * t);
+      const cy = isl.y + dy * (inner + (outer - inner) * t);
+      for (const s of [1, -1]) {
+        ctx.beginPath();
+        ctx.arc(cx + px * halfW * s, cy + py * halfW * s, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  /** Icebergs: a small bright tip above water hinting at the danger below. */
+  private drawIcebergs() {
+    const ctx = this.ctx;
+    for (const berg of this.icebergs) {
+      // Faint halo showing the submerged bulk you can strike from afar.
+      ctx.beginPath();
+      ctx.arc(berg.x, berg.y, berg.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(180, 215, 235, 0.12)';
+      ctx.fill();
+
+      // The visible tip: a jagged ice shard, seeded from its position.
+      const tip = berg.r * 0.42;
+      const facets = 9;
+      ctx.beginPath();
+      for (let i = 0; i <= facets; i++) {
+        const a = (i / facets) * Math.PI * 2;
+        const wob = 0.72 + 0.42 * jitter(berg.x + berg.y, i);
+        const rx = berg.x + Math.cos(a) * tip * wob;
+        const ry = berg.y + Math.sin(a) * tip * wob;
+        i === 0 ? ctx.moveTo(rx, ry) : ctx.lineTo(rx, ry);
+      }
+      ctx.closePath();
+      ctx.fillStyle = '#e8f4fb';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(120, 160, 185, 0.7)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      // a couple of shaded facets for a bit of 3D
+      ctx.beginPath();
+      ctx.moveTo(berg.x, berg.y - tip * 0.5);
+      ctx.lineTo(berg.x + tip * 0.5, berg.y + tip * 0.4);
+      ctx.lineTo(berg.x - tip * 0.3, berg.y + tip * 0.5);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(173, 206, 226, 0.7)';
+      ctx.fill();
+    }
+  }
+
+  /** Soft translucent clouds drifting over the battlefield. */
+  private drawClouds() {
+    const ctx = this.ctx;
+    ctx.save();
+    for (const c of this.clouds) {
+      // A fluffy blob from a few overlapping lobes, seeded so it's stable.
+      const lobes = 5;
+      for (let i = 0; i < lobes; i++) {
+        const a = (i / lobes) * Math.PI * 2;
+        const off = c.r * 0.45;
+        const lr = c.r * (0.55 + 0.3 * jitter(c.r + i, i));
+        ctx.beginPath();
+        ctx.arc(c.x + Math.cos(a) * off, c.y + Math.sin(a) * off * 0.6, lr, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(236, 242, 248, 0.16)';
+        ctx.fill();
+      }
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, c.r * 0.7, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(240, 245, 250, 0.18)';
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /** Frozen-by-host overlay. */
+  private drawPaused() {
+    const ctx = this.ctx;
+    ctx.fillStyle = 'rgba(10, 25, 40, 0.55)';
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 44px system-ui, sans-serif';
+    ctx.fillText('⏸ Paused', WORLD_W / 2, WORLD_H / 2 - 16);
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText(
+      this.mode.kind === 'host' ? 'Press Resume to continue' : 'The host paused the battle',
+      WORLD_W / 2,
+      WORLD_H / 2 + 26,
+    );
+  }
+
+  /** A faint nudge so desktop players discover the chat. */
+  private drawChatHint() {
+    if (this.mode.kind === 'solo' || TOUCH || this.over) return;
+    const ctx = this.ctx;
+    ctx.font = '13px system-ui, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.fillText('Press Enter to chat', WORLD_W - 16, WORLD_H - 14);
   }
 
   private drawShipSelect() {

@@ -163,6 +163,7 @@ function buildHostPanel(game: Game, initialMode: BattleMode) {
   panel.innerHTML = `
     <button id="panel-toggle">⚙ Host</button>
     <div id="panel-body" hidden>
+      <button id="panel-pause">⏸ Pause</button>
       <label>Mode
         <select id="panel-mode">
           <option value="elimination">Last ship standing</option>
@@ -185,10 +186,25 @@ function buildHostPanel(game: Game, initialMode: BattleMode) {
   const modeSel = panel.querySelector('#panel-mode') as HTMLSelectElement;
   const targetSel = panel.querySelector('#panel-target') as HTMLSelectElement;
   const players = panel.querySelector('#panel-players') as HTMLDivElement;
+  const pauseBtn = panel.querySelector('#panel-pause') as HTMLButtonElement;
   modeSel.value = initialMode;
 
   panel.querySelector('#panel-toggle')!.addEventListener('click', () => {
     body.hidden = !body.hidden;
+  });
+
+  const setPauseLabel = (paused: boolean) => {
+    pauseBtn.textContent = paused ? '▶ Resume' : '⏸ Pause';
+    pauseBtn.classList.toggle('active', paused);
+  };
+  pauseBtn.addEventListener('click', () => setPauseLabel(game.togglePause()));
+  // 'P' is a handy shortcut for the host (ignored while typing in chat).
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'KeyP') {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
+      setPauseLabel(game.togglePause());
+    }
   });
 
   const applyRules = () => {

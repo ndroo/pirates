@@ -545,10 +545,18 @@ await solo.waitForSelector('#lobby', { state: 'detached', timeout: 10000 });
 await hold(solo, 'Digit1');
 await solo.waitForFunction(() => window.__game.phase === 'battle', null, { timeout: 10000 });
 
+// Isolate island avoidance: clear the round's random icebergs (a double
+// scrape could sink the ship) and piers (a separate hazard, tested above).
+await solo.evaluate(() => {
+  const g = window.__game;
+  g.icebergs = [];
+  for (const isl of g.islands) delete isl.pier;
+});
 let groundings = 0;
 for (let k = 0; k < 8; k++) {
   await solo.evaluate((k) => {
     const g = window.__game;
+    g.icebergs = []; // stay clear each iteration too
     const isl = g.islands[k % g.islands.length];
     const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
     // Rotate the approach until the spawn spot is on-map and on open water —
@@ -581,24 +589,23 @@ for (let k = 0; k < 8; k++) {
 if (groundings > 0) throw new Error(`AI ran aground ${groundings}/8 times`);
 console.log('AI dodged islands 8/8 ✓');
 
-// Wind physics: the same ship covers more water downwind than upwind.
-const measure = async (against) => {
-  await solo.evaluate((against) => {
+// Wind physics: the same ship covers more water downwind than upwind. Step
+// the ship's own integrator with a fixed dt so the result can't be skewed by
+// real-time frame throttling on a backgrounded page.
+const measure = (against) =>
+  solo.evaluate((against) => {
     const g = window.__game;
-    g.islands = []; // clear water for the measurement (host-side sim only)
     const ship = g.slots[0].ship;
     ship.health = ship.maxHealth;
     ship.x = 640;
     ship.y = 360;
     ship.heading = g.wind.dir + (against ? Math.PI : 0);
-    window.__start = { x: ship.x, y: ship.y };
+    const wind = { x: Math.cos(g.wind.dir) * g.wind.strength, y: Math.sin(g.wind.dir) * g.wind.strength };
+    const x0 = ship.x;
+    const y0 = ship.y;
+    for (let i = 0; i < 30; i++) ship.update(0.03, 0, 1280, 720, wind, false); // 0.9s, sails set
+    return Math.hypot(ship.x - x0, ship.y - y0);
   }, against);
-  await solo.waitForTimeout(900);
-  return solo.evaluate(() => {
-    const ship = window.__game.slots[0].ship;
-    return Math.hypot(ship.x - window.__start.x, ship.y - window.__start.y);
-  });
-};
 const downwind = await measure(false);
 const upwind = await measure(true);
 if (downwind <= upwind * 1.02) throw new Error(`wind has no effect: downwind ${downwind} vs upwind ${upwind}`);

@@ -69,14 +69,16 @@ export class Torpedo {
   heading: number;
   spent = false;
   readonly ownerId: number;
+  readonly underwater: boolean; // fired submerged → only hits submerged subs
 
   private traveled = 0;
 
-  constructor(x: number, y: number, heading: number, ownerId: number) {
+  constructor(x: number, y: number, heading: number, ownerId: number, underwater: boolean) {
     this.x = x;
     this.y = y;
     this.heading = heading;
     this.ownerId = ownerId;
+    this.underwater = underwater;
   }
 
   update(dt: number) {

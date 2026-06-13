@@ -1,6 +1,7 @@
 // Smoke test: a 3-player match via the real PeerJS broker, plus rejection of
 // duplicate-device and over-capacity joins.
 import { chromium, devices } from 'playwright';
+import fs from 'node:fs';
 
 const GAME_URL = process.env.GAME_URL || 'http://localhost:4173/';
 
@@ -48,6 +49,35 @@ async function joinVia(page, link, name) {
   if (await btn.isVisible().catch(() => false)) await btn.click().catch(() => {});
 }
 
+// --- Resumable, streaming runner -----------------------------------------
+// Each phase is independent (own browser pages). Passed phases are recorded to
+// a checkpoint so a re-run resumes where it stopped. A per-phase watchdog kills
+// a hung phase rather than letting it spin forever. Set E2E_RESET=1 for a clean
+// run; E2E_CKPT to point at a different checkpoint file.
+const CKPT = process.env.E2E_CKPT || '/tmp/e2e-ckpt.json';
+let donePhases = [];
+if (process.env.E2E_RESET) {
+  try { fs.unlinkSync(CKPT); } catch {}
+} else {
+  try { donePhases = JSON.parse(fs.readFileSync(CKPT, 'utf8')); } catch {}
+}
+async function phase(name, fn) {
+  if (donePhases.includes(name)) {
+    console.log(`↷ skip ${name} (already passed)`);
+    return;
+  }
+  console.log(`▶ ${name}`);
+  await Promise.race([
+    fn(),
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`watchdog: phase '${name}' exceeded 240s`)), 240000)),
+  ]);
+  donePhases.push(name);
+  fs.writeFileSync(CKPT, JSON.stringify(donePhases));
+  console.log(`✅ ${name}`);
+}
+
+try {
+await phase('multiplayer', async () => {
 const host = await newPlayer('host', { width: 1300, height: 760 });
 await host.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(GAME_URL).origin });
 await host.goto(GAME_URL);
@@ -521,6 +551,9 @@ await joinVia(guest4, link2, 'Calico Jack');
 await host2.waitForFunction(() => document.getElementById('player-count').textContent.startsWith('2/2'), null, { timeout: 30000 });
 console.log('host refresh resumed the room; old invite link still valid ✓');
 
+});
+
+await phase('midjoin', async () => {
 // --- Mid-round joins and the empty-room reset. ---
 const hostM = await newPlayer('hostM', { width: 1300, height: 760 });
 await hostM.goto(GAME_URL);
@@ -558,6 +591,9 @@ await hostM.waitForFunction(() => window.__game.phase === 'select', null, { time
 console.log('empty room returns the host to the pre-game screen ✓');
 await hostM.close();
 
+});
+
+await phase('solo', async () => {
 // --- Solo AI seamanship: aim the AI straight at an island (with its ---
 // --- prey on the far side, the worst case) and expect it to dodge.  ---
 const solo = await newPlayer('solo', { width: 1100, height: 700 });
@@ -662,6 +698,9 @@ const upwind = await measure(true);
 if (downwind <= upwind * 1.02) throw new Error(`wind has no effect: downwind ${downwind} vs upwind ${upwind}`);
 console.log(`wind physics: downwind ${Math.round(downwind)}px vs upwind ${Math.round(upwind)}px ✓`);
 
+});
+
+await phase('mobile', async () => {
 // --- Mobile: tap to pick a ship, on-screen buttons steer and fire. ---
 const phoneCtx = await browser.newContext({ ...devices['iPhone 13'] });
 const phone = await phoneCtx.newPage();
@@ -724,6 +763,9 @@ await phone.waitForFunction(
 console.log('rematch auto-picked the previous ship ✓');
 await phoneCtx.close();
 
+});
+
+await phase('invite-escape', async () => {
 // --- Invite screen offers a solo escape hatch. ---
 const loner = await newPlayer('loner', { width: 1000, height: 700 });
 await loner.goto(`${GAME_URL}?join=ZZZZ`);
@@ -733,7 +775,10 @@ const cleanUrl = await loner.evaluate(() => location.search);
 if (cleanUrl.includes('join')) throw new Error('solo escape left ?join in the URL');
 console.log('invite screen solo escape ✓');
 
-// --- Submarine: dives over ~3s, can't fire submerged, untargetable, then fires surfaced. ---
+});
+
+await phase('submarine', async () => {
+// --- Submarine: dives, fires torpedoes by depth, hidden when submerged. ---
 const subPage = await newPlayer('sub', { width: 1100, height: 700 });
 await subPage.goto(GAME_URL);
 await subPage.click('#solo-btn');
@@ -772,52 +817,62 @@ if ((await subPage.evaluate(() => window.__game.wakes.get(0)?.length ?? 0)) !== 
 }
 console.log('submerged sub leaves no wake ✓');
 
-// Submerged: holding fire produces no torpedoes, and it's untargetable.
-await subPage.evaluate(() => { window.__game.torpedoes.length = 0; });
-await subPage.keyboard.down('Space');
-await subPage.waitForTimeout(900);
-await subPage.keyboard.up('Space');
-if ((await subPage.evaluate(() => window.__game.torpedoes.length)) !== 0) {
-  throw new Error('submerged submarine fired');
+// Submerged, the sub fires an UNDERWATER torpedo, which slides past surface ships.
+await subPage.evaluate(() => {
+  const g = window.__game;
+  g.islands = []; g.icebergs = []; g.torpedoes.length = 0;
+  const s = g.slots[0].ship;
+  s.x = 250; s.y = 360; s.heading = 0; s.gunReload = s.gunReload.map(() => 0);
+  const e = g.slots[1].ship; // surface ship right in the torpedo's path
+  e.health = e.maxHealth; e.x = 520; e.y = 360; e.dive = 0;
+  window.__surfHp = e.maxHealth;
+});
+await pressUntil(subPage, 'Space', () => window.__game.torpedoes.length > 0, 'an underwater torpedo');
+if (!(await subPage.evaluate(() => window.__game.torpedoes[0].underwater))) {
+  throw new Error('submerged sub did not fire an underwater torpedo');
 }
-console.log('submerged sub cannot fire, and is untargetable ✓');
+console.log('submerged sub fires underwater torpedoes ✓');
+await subPage.waitForTimeout(1600); // torpedoes run their course past the surface ship
+if ((await subPage.evaluate(() => window.__game.slots[1].ship.health)) < (await subPage.evaluate(() => window.__surfHp))) {
+  throw new Error('underwater torpedo struck a surface ship');
+}
+console.log('underwater torpedoes pass surface ships ✓');
 
 // Radar sweep paints a sonar contact on the submerged sub.
 await subPage.evaluate(() => { window.__game.pings.length = 0; window.__game.pingTimer = 1000; });
 await subPage.waitForFunction(() => window.__game.pings.length > 0, null, { timeout: 2000, polling: 50 });
 console.log('radar ping reveals the submerged sub ✓');
 
-// A depth charge hurts the submerged sub but not a surface ship beside it.
+// Depth charges: as many tubes as cannons, and they hammer a sub at ANY depth —
+// here a surfaced one — while never scratching a surface boat.
 await subPage.evaluate(() => {
   const g = window.__game;
+  g.myDive = false; // bring the sub up and keep it there
   const sub = g.slots[0].ship;
-  const surf = g.slots[1].ship; // the AI surface ship
-  sub.health = sub.maxHealth;
-  surf.health = surf.maxHealth;
-  sub.x = 400; sub.y = 360;
-  surf.x = 420; surf.y = 360; // well within the blast radius
-  window.__hp = { sub: sub.maxHealth, surf: surf.maxHealth };
+  const surf = g.slots[1].ship;
+  sub.dive = 0;
+  sub.health = sub.maxHealth; surf.health = surf.maxHealth;
+  // Both within the blast radius, but far enough apart not to ram each other.
+  sub.x = 400; sub.y = 360; surf.x = 470; surf.y = 360;
+  window.__hp = { sub: sub.maxHealth, surf: surf.maxHealth, tubes: surf.dcReload.length, guns: surf.guns };
   g.depthCharges.push({ x: 400, y: 360, ownerId: 1, sink: 0.05, spent: false });
 });
-await subPage.waitForFunction(
-  () => {
-    const g = window.__game;
-    return g.depthCharges.length === 0 && g.slots[0].ship.health < window.__hp.sub;
-  },
-  null, { timeout: 3000, polling: 50 },
-);
+const meta = await subPage.evaluate(() => window.__hp);
+if (meta.tubes !== meta.guns) throw new Error(`depth-charge tubes ${meta.tubes} != cannons ${meta.guns}`);
+await subPage.waitForFunction(() => window.__game.depthCharges.length === 0 && window.__game.slots[0].ship.health < window.__hp.sub, null, { timeout: 3000, polling: 50 });
 const dcResult = await subPage.evaluate(() => ({
   subDmg: window.__hp.sub - window.__game.slots[0].ship.health,
   surfDmg: window.__hp.surf - window.__game.slots[1].ship.health,
 }));
 if (dcResult.subDmg <= 0 || dcResult.surfDmg !== 0) throw new Error(`depth charge wrong: ${JSON.stringify(dcResult)}`);
-console.log('depth charge hits the submerged sub, spares the surface ship ✓');
+console.log('depth charges = cannon count; hit a surfaced sub, spare surface boats ✓');
 
 // Submerged, it glides under an iceberg unharmed but still sinks on an island.
 await subPage.evaluate(() => {
   const g = window.__game;
+  g.myDive = true;
   const s = g.slots[0].ship;
-  s.health = s.maxHealth; s.bergSafe = 0;
+  s.dive = 1; s.health = s.maxHealth; s.bergSafe = 0;
   s.x = 300; s.y = 300;
   g.icebergs = [{ x: 300, y: 300, r: 60, hp: 8, maxHp: 8 }];
 });
@@ -834,20 +889,22 @@ await subPage.evaluate(() => {
 await subPage.waitForFunction(() => !window.__game.slots[0].ship.alive, null, { timeout: 3000 });
 console.log('submerged sub passes under icebergs but sinks on islands ✓');
 
-// Surface (~3s) and confirm torpedoes come back online.
-await hold(subPage, 'KeyE');
-await subPage.waitForFunction(() => window.__game.slots[0].ship.dive === 0, null, { timeout: 8000, polling: 50 });
+// Surface the sub (set state directly — no KeyE, which would just toggle it
+// back down) and confirm it now fires a SURFACE torpedo, not an underwater one.
 await subPage.evaluate(() => {
   const g = window.__game;
+  g.myDive = false; // stay up
   g.islands = []; g.icebergs = [];
   const s = g.slots[0].ship;
-  s.health = s.maxHealth; s.x = 400; s.y = 360; s.heading = 0; s.gunReload = s.gunReload.map(() => 0);
+  s.health = s.maxHealth; s.sinkProgress = 0; s.dive = 0;
+  s.x = 250; s.y = 360; s.heading = 0; s.gunReload = s.gunReload.map(() => 0);
   g.torpedoes.length = 0;
 });
-await subPage.keyboard.down('Space');
-await subPage.waitForFunction(() => window.__game.torpedoes.length > 0, null, { timeout: 4000, polling: 50 });
-await subPage.keyboard.up('Space');
-console.log('surfaced submarine fires torpedoes ✓');
+await pressUntil(subPage, 'Space', () => window.__game.torpedoes.length > 0, 'a surface torpedo');
+if (await subPage.evaluate(() => window.__game.torpedoes[0].underwater)) {
+  throw new Error('surfaced sub fired an underwater torpedo');
+}
+console.log('surfaced sub fires surface torpedoes ✓');
 
 // Surfaced with the engine cut, the sub drifts on the wind; submerged it holds still.
 await subPage.evaluate(() => {
@@ -869,6 +926,9 @@ if (subDrift > 4) throw new Error(`submerged engine-off sub drifted: ${Math.roun
 console.log('sub drifts surfaced with engine off, holds still submerged ✓');
 await subPage.close();
 
+});
+
+await phase('career', async () => {
 // --- Scoreboard accumulates a career score across rematches. ---
 const careerPage = await newPlayer('career', { width: 1100, height: 700 });
 await careerPage.goto(GAME_URL);
@@ -896,6 +956,15 @@ const liveTotal = await careerPage.evaluate(() => (window.__game.careerScore.get
 if (liveTotal !== 3) throw new Error(`career total wrong mid-round: got ${liveTotal}, expected 3`);
 console.log('scoreboard accumulates career score across rematches ✓');
 await careerPage.close();
+});
 
-await browser.close();
-console.log('done');
+  try { fs.unlinkSync(CKPT); } catch {} // full pass — start fresh next time
+  console.log('done');
+} catch (e) {
+  console.log('FAILED:', e && e.message ? e.message : e);
+  console.log('(re-run to resume from the failed phase; set E2E_RESET=1 to start over)');
+  process.exitCode = 1;
+} finally {
+  await browser.close().catch(() => {});
+  process.exit(process.exitCode || 0);
+}

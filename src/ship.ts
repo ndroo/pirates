@@ -44,6 +44,7 @@ export class Ship {
   health: number;
   guns: number;
   gunReload: number[]; // s until each gun is ready again
+  dcReload: number[]; // s until each depth-charge tube is ready (one per gun)
   ramSafe = 0; // s of immunity left after being rammed
   bergSafe = 0; // s of immunity left after scraping an iceberg
   sailsDown = false; // furled sails / engine off — no propulsion
@@ -72,6 +73,7 @@ export class Ship {
     this.health = stats.maxHealth;
     this.guns = stats.guns;
     this.gunReload = new Array(stats.guns).fill(0);
+    this.dcReload = new Array(stats.guns).fill(0); // as many depth charges as cannons
     this.length = stats.length;
     this.width = stats.width;
   }
@@ -104,6 +106,7 @@ export class Ship {
   ) {
     for (let i = 0; i < this.gunReload.length; i++) {
       this.gunReload[i] = Math.max(0, this.gunReload[i] - dt);
+      this.dcReload[i] = Math.max(0, this.dcReload[i] - dt);
     }
     this.ramSafe = Math.max(0, this.ramSafe - dt);
     this.bergSafe = Math.max(0, this.bergSafe - dt);

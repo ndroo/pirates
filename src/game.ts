@@ -241,9 +241,9 @@ interface Slot {
   input: { turn: Turn; fire: boolean; drop: boolean; restart: boolean; sail: boolean; dive: boolean; dc: boolean }; // latest remote keys
   score: number; // ships sunk (respawn mode)
   mineCool: number; // s until the next barrel is ready
-  dcCool: number; // s until the next depth charge is ready
   fireMode: FireMode;
   prevFire: boolean; // for edge-detecting presses in rolling mode
+  prevDC: boolean; // for edge-detecting depth-charge drops
   respawnIn: number | null; // s until respawn, once fully sunk
   left: boolean; // disconnected mid-battle; never respawns
   avoid: Turn; // AI: committed island-avoidance turn (0 = clear course)
@@ -260,9 +260,9 @@ function newSlot(id: number, name = '', ai = false): Slot {
     input: { turn: 0, fire: false, drop: false, restart: false, sail: false, dive: false, dc: false },
     score: 0,
     mineCool: 0,
-    dcCool: 0,
     fireMode: 'volley',
     prevFire: false,
+    prevDC: false,
     respawnIn: null,
     left: false,
     avoid: 0,
@@ -282,7 +282,7 @@ export class Game {
   private myPick: ShipTypeName | null = null;
   private cannonballs: Cannonball[] = [];
   private torpedoes: Torpedo[] = [];
-  private remoteTorps: { x: number; y: number; h: number }[] = []; // guest: torpedoes from snapshots
+  private remoteTorps: { x: number; y: number; h: number; u: boolean }[] = []; // guest: torpedoes from snapshots
   private depthCharges: DepthCharge[] = [];
   private remoteCharges: { x: number; y: number }[] = []; // guest: sinking charges from snapshots
   private pings: Ping[] = []; // sonar contacts
@@ -655,9 +655,9 @@ export class Game {
     if (!slot?.ship) return;
     slot.score = snap.score;
     slot.mineCool = snap.mineCool;
-    slot.dcCool = snap.dcCool;
     const ship = slot.ship;
     ship.gunReload = snap.guns;
+    ship.dcReload = snap.dcs;
     ship.x = snap.x;
     ship.y = snap.y;
     ship.heading = snap.heading;
@@ -890,10 +890,7 @@ export class Game {
     this.pingTimer = 0;
     this.paused = false;
     this.enterBattleFireMode();
-    for (const slot of this.slots) {
-      slot.mineCool = 0;
-      slot.dcCool = 0;
-    }
+    for (const slot of this.slots) slot.mineCool = 0;
     this.cannonballs = [];
     this.explosions = [];
     this.pendingBoom = [];
@@ -947,6 +944,7 @@ export class Game {
     // Assume the worst-case tailwind throughout so the dodge is never started
     // later than the real (wind-boosted) ship would need.
     const speed = ship.speed * (1 + this.wind.strength);
+    if (speed <= 0) return Infinity; // a dead-in-the-water ship can't run aground (and would loop forever)
     const step = 0.1;
     let x = ship.x;
     let y = ship.y;
@@ -1191,11 +1189,10 @@ export class Game {
 
       const firePressed = fire && !slot.prevFire;
       slot.prevFire = fire;
-      // A submarine can only fire while fully surfaced.
-      const armed = ship.dive === 0;
-      if (!this.over && ship.alive && armed) {
+      if (!this.over && ship.alive) {
         if (ship.type === 'sub') {
-          // Subs run torpedoes straight off the bow — one per press, per tube.
+          // Subs fire torpedoes off the bow at any depth — the depth they're at
+          // decides whether the torpedo runs on the surface or beneath it.
           if (firePressed && ship.nextLoadedGun >= 0) this.fireTorpedo(slot);
         } else {
           const target = this.nearestEnemy(ship);
@@ -1229,8 +1226,11 @@ export class Game {
         slot.mineCool = MINE_RECHARGE;
       }
 
-      slot.dcCool = Math.max(0, slot.dcCool - dt);
-      if (!this.over && surface && dropDC && ship.alive && slot.dcCool <= 0) {
+      // One depth charge per press, from the next ready tube (as many as guns).
+      const dcPressed = dropDC && !slot.prevDC;
+      slot.prevDC = dropDC;
+      const dcTube = ship.dcReload.findIndex((r) => r <= 0);
+      if (!this.over && surface && dcPressed && ship.alive && dcTube >= 0) {
         this.depthCharges.push({
           x: ship.x - Math.cos(ship.heading) * (ship.length / 2 + 10),
           y: ship.y - Math.sin(ship.heading) * (ship.length / 2 + 10),
@@ -1238,7 +1238,7 @@ export class Game {
           sink: DC_SINK,
           spent: false,
         });
-        slot.dcCool = DC_COOLDOWN;
+        ship.dcReload[dcTube] = DC_COOLDOWN;
       }
     }
 
@@ -1332,12 +1332,12 @@ export class Game {
           score: s.score,
           guns: s.ship!.gunReload,
           mineCool: s.mineCool,
-          dcCool: s.dcCool,
+          dcs: s.ship!.dcReload,
           sail: s.ship!.sailsDown,
           dive: s.ship!.dive,
         })),
         balls: this.cannonballs.map((b) => ({ x: b.x, y: b.y, p: b.p })),
-        torps: this.torpedoes.map((t) => ({ x: t.x, y: t.y, h: t.heading })),
+        torps: this.torpedoes.map((t) => ({ x: t.x, y: t.y, h: t.heading, u: t.underwater })),
         mines: this.mineSnaps(),
         charges: this.depthCharges.map((c) => ({ x: c.x, y: c.y })),
         icebergs: this.icebergs,
@@ -1386,7 +1386,10 @@ export class Game {
       }
       for (const slot of this.slots) {
         const target = slot.ship;
-        if (!target || slot.id === t.ownerId || !target.alive || isGhost(target)) continue;
+        if (!target || slot.id === t.ownerId || !target.alive) continue;
+        // A surface torpedo only strikes surface targets; an underwater one only
+        // strikes submerged subs. They never cross between the two depths.
+        if (t.underwater !== isGhost(target)) continue;
         if (target.containsPoint(t.x, t.y)) {
           t.spent = true;
           for (let i = 0; i < TORPEDO_DAMAGE; i++) target.takeHit();
@@ -1414,8 +1417,9 @@ export class Game {
       if (this.over) continue;
       for (const slot of this.slots) {
         const ship = slot.ship;
-        // Only a submerged sub is in the water column the blast fills.
-        if (!ship?.alive || ship.type !== 'sub' || ship.dive <= 0 || slot.id === dc.ownerId) continue;
+        // Depth charges hammer any submarine in the blast — surfaced or not —
+        // but never harm a surface boat.
+        if (!ship?.alive || ship.type !== 'sub' || slot.id === dc.ownerId) continue;
         if (Math.hypot(ship.x - dc.x, ship.y - dc.y) < DC_RADIUS + ship.width / 2) {
           for (let i = 0; i < DC_DAMAGE; i++) ship.takeHit();
           if (!ship.alive) {
@@ -1442,14 +1446,14 @@ export class Game {
     }
   }
 
-  /** Launch a torpedo from the sub's bow, straight ahead. */
+  /** Launch a torpedo from the sub's bow, straight ahead, at the sub's depth. */
   private fireTorpedo(slot: Slot) {
     const ship = slot.ship!;
     const tube = ship.nextLoadedGun;
     if (tube < 0) return;
     const bx = ship.x + Math.cos(ship.heading) * (ship.length / 2 + 5);
     const by = ship.y + Math.sin(ship.heading) * (ship.length / 2 + 5);
-    this.torpedoes.push(new Torpedo(bx, by, ship.heading, slot.id));
+    this.torpedoes.push(new Torpedo(bx, by, ship.heading, slot.id, isGhost(ship)));
     ship.gunReload[tube] = TORPEDO_RELOAD;
   }
 
@@ -1663,11 +1667,22 @@ export class Game {
       for (const bl of this.depthBlasts) bl.draw(ctx); // underwater churn, beneath ships
       this.drawMines();
       for (const sp of this.splashes) sp.draw(ctx);
+      const under = this.viewerSubmerged; // surface players never see underwater torpedoes
       if (this.mode.kind === 'guest') {
-        for (const t of this.remoteTorps) drawTorpedo(ctx, t.x, t.y, t.h);
+        for (const t of this.remoteTorps) {
+          if (t.u && !under) continue;
+          ctx.globalAlpha = t.u ? 0.7 : 1;
+          drawTorpedo(ctx, t.x, t.y, t.h);
+        }
+        ctx.globalAlpha = 1;
         for (const ball of this.remoteBalls) drawCannonball(ctx, ball.x, ball.y, ball.p);
       } else {
-        for (const t of this.torpedoes) t.draw(ctx);
+        for (const t of this.torpedoes) {
+          if (t.underwater && !under) continue;
+          ctx.globalAlpha = t.underwater ? 0.7 : 1;
+          t.draw(ctx);
+        }
+        ctx.globalAlpha = 1;
         for (const ball of this.cannonballs) ball.draw(ctx);
       }
       for (const slot of this.slots) this.drawSlotShip(slot);
@@ -1697,14 +1712,20 @@ export class Game {
     if (this.disconnected) this.drawDisconnected();
   }
 
+  /** True if this viewer is themselves running submerged (sees the deep). */
+  private get viewerSubmerged(): boolean {
+    return isGhost(this.selfSlot?.ship);
+  }
+
   /** Draw a slot's ship, hiding/fading a diving submarine appropriately. */
   private drawSlotShip(slot: Slot) {
     const ship = slot.ship;
     if (!ship) return;
     if (ship.type === 'sub' && ship.dive > 0) {
       const mine = slot.id === this.selfId;
-      if (!mine && isGhost(ship)) return; // others can't see a submerged sub at all
-      // Fade as it goes under; the owner keeps a faint trace of their own boat.
+      // A submerged sub is unseen by surface players, but its owner — and any
+      // other submerged sub — can make it out down in the deep.
+      if (!mine && isGhost(ship) && !this.viewerSubmerged) return;
       const alpha = mine ? Math.max(0.3, 1 - ship.dive) : 1 - ship.dive;
       ship.draw(this.ctx, alpha);
     } else {
@@ -1722,7 +1743,7 @@ export class Game {
   private drawShipTag(slot: Slot) {
     const ship = slot.ship;
     if (!ship || !ship.alive || this.slots.length <= 2) return;
-    if (isGhost(ship) && slot.id !== this.selfId) return; // no tag floats over a hidden sub
+    if (isGhost(ship) && slot.id !== this.selfId && !this.viewerSubmerged) return; // no tag over a sub hidden from this viewer
     const ctx = this.ctx;
     ctx.font = 'bold 12px system-ui, sans-serif';
     ctx.textAlign = 'center';
@@ -2374,7 +2395,18 @@ export class Game {
       ctx.fillText(ds, cx, y0 + 36);
     } else {
       bar('Barrel (S)', 1 - Math.min(slot.mineCool / MINE_RECHARGE, 1), y0 + 16, '#e8742c', 'rgba(232, 116, 44, 0.55)');
-      bar('Depth charge (Q)', 1 - Math.min(slot.dcCool / DC_COOLDOWN, 1), y0 + 32, '#3fa0c8', 'rgba(63, 160, 200, 0.5)');
+      // Depth charges: one segment per tube (as many tubes as cannons).
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+      ctx.fillText('Depth charge (Q)', x0 - 10, y0 + 37);
+      ship.dcReload.forEach((r, i) => {
+        const frac = 1 - Math.min(r / DC_COOLDOWN, 1);
+        const x = x0 + i * (segW + gap);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+        ctx.fillRect(x, y0 + 32, segW, 10);
+        ctx.fillStyle = frac >= 1 ? '#3fa0c8' : 'rgba(63, 160, 200, 0.5)';
+        ctx.fillRect(x, y0 + 32, segW * frac, 10);
+      });
       ctx.textAlign = 'center';
       ctx.fillStyle = this.myFurled ? '#ffd75e' : 'rgba(255, 255, 255, 0.7)';
       ctx.fillText(this.myFurled ? '⛵ Sails furled — drifting (W)' : '⛵ Sails set (W)', cx, y0 + 50);

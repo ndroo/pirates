@@ -144,6 +144,7 @@ function enableTouchControls(input: Input, game: Game, multiplayer: boolean) {
   bind('tc-right', 'ArrowRight');
   bind('tc-fire', 'Space');
   bind('tc-mine', 'KeyS');
+  bind('tc-dc', 'KeyQ');
   // Sail and fire-mode are toggles, so call the game directly (a tap, not a hold).
   document.getElementById('tc-sail')!.addEventListener('click', () => game.toggleSails());
   document.getElementById('tc-dive')!.addEventListener('click', () => game.toggleDive());

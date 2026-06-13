@@ -59,6 +59,61 @@ export class Cannonball {
   }
 }
 
+const TORPEDO_SPEED = 300; // px/s
+const TORPEDO_RANGE = 540; // px before it runs out of fuel
+
+/** A submarine torpedo: runs straight and flat, long and fast. */
+export class Torpedo {
+  x: number;
+  y: number;
+  heading: number;
+  spent = false;
+  readonly ownerId: number;
+
+  private traveled = 0;
+
+  constructor(x: number, y: number, heading: number, ownerId: number) {
+    this.x = x;
+    this.y = y;
+    this.heading = heading;
+    this.ownerId = ownerId;
+  }
+
+  update(dt: number) {
+    const d = TORPEDO_SPEED * dt;
+    this.x += Math.cos(this.heading) * d;
+    this.y += Math.sin(this.heading) * d;
+    this.traveled += d;
+    if (this.traveled >= TORPEDO_RANGE) this.spent = true;
+  }
+
+  draw(ctx: CanvasRenderingContext2D) {
+    drawTorpedo(ctx, this.x, this.y, this.heading);
+  }
+}
+
+export function drawTorpedo(ctx: CanvasRenderingContext2D, x: number, y: number, heading: number) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(heading);
+  // Foam wake streaming behind the tail.
+  ctx.beginPath();
+  ctx.moveTo(-6, 0);
+  ctx.lineTo(-18, 0);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // Body: a small dart, nose at +x.
+  ctx.beginPath();
+  ctx.moveTo(7, 0);
+  ctx.lineTo(-5, -2.4);
+  ctx.lineTo(-5, 2.4);
+  ctx.closePath();
+  ctx.fillStyle = '#2a2a2a';
+  ctx.fill();
+  ctx.restore();
+}
+
 export function drawCannonball(ctx: CanvasRenderingContext2D, x: number, y: number, p = 0) {
   const lift = Math.sin(Math.PI * p);
 

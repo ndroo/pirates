@@ -1,5 +1,91 @@
 const DURATION = 0.5; // s
 const SPLASH_DURATION = 0.55; // s
+const PING_DURATION = 1.6; // s — a sonar contact lingers on screen
+const BLAST_DURATION = 0.8; // s — depth-charge underwater churn
+
+/** A sonar contact: an expanding cyan ring marking where a sub was pinged. */
+export class Ping {
+  x: number;
+  y: number;
+  private age = 0;
+
+  constructor(x: number, y: number) {
+    this.x = x;
+    this.y = y;
+  }
+
+  get done(): boolean {
+    return this.age >= PING_DURATION;
+  }
+
+  update(dt: number) {
+    this.age += dt;
+  }
+
+  draw(ctx: CanvasRenderingContext2D) {
+    const t = this.age / PING_DURATION;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, 5 + t * 42, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(90, 220, 255, ${0.7 * (1 - t)})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    if (t < 0.55) {
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(120, 230, 255, ${0.85 * (1 - t / 0.55)})`;
+      ctx.fill();
+    }
+  }
+}
+
+/** A depth charge going off underwater: a murky churn with foam bubbles. */
+export class DepthBlast {
+  x: number;
+  y: number;
+  private r: number;
+  private age = 0;
+  private bubbles: { dx: number; dy: number }[] = [];
+
+  constructor(x: number, y: number, r: number) {
+    this.x = x;
+    this.y = y;
+    this.r = r;
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2;
+      const sp = 0.5 + Math.random() * 0.6;
+      this.bubbles.push({ dx: Math.cos(a) * r * sp, dy: Math.sin(a) * r * sp });
+    }
+  }
+
+  get done(): boolean {
+    return this.age >= BLAST_DURATION;
+  }
+
+  update(dt: number) {
+    this.age += dt;
+  }
+
+  draw(ctx: CanvasRenderingContext2D) {
+    const t = Math.min(this.age / BLAST_DURATION, 1);
+    // churned water disc
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r * t, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(150, 200, 230, ${0.28 * (1 - t)})`;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r * t, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(235, 248, 255, ${0.75 * (1 - t)})`;
+    ctx.lineWidth = 3 * (1 - t) + 1;
+    ctx.stroke();
+    // foam bubbles flung outward
+    ctx.fillStyle = `rgba(245, 252, 255, ${0.8 * (1 - t)})`;
+    for (const b of this.bubbles) {
+      ctx.beginPath();
+      ctx.arc(this.x + b.dx * t, this.y + b.dy * t, 3 * (1 - t) + 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
 
 /** A ring of white water where a cannonball (or fizzling barrel) lands. */
 export class Splash {

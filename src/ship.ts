@@ -117,10 +117,15 @@ export class Ship {
     // You can still swing the hull to bring a broadside to bear when drifting.
     this.heading += turn * this.turnRate * dt;
     if (this.type === 'sub') {
-      // Engine-powered: wind doesn't push a submarine. Engine off = dead stop.
       if (!sailsDown) {
+        // Engine on: powered, and the wind doesn't push a submarine.
         this.x += Math.cos(this.heading) * this.speed * dt;
         this.y += Math.sin(this.heading) * this.speed * dt;
+      } else if (this.dive <= 0 && wind) {
+        // Engine off on the surface: drift with the wind/current. Submerged
+        // with the engine off, it just hangs dead in the water.
+        this.x += wind.x * SAIL_DOWN_DRIFT * dt;
+        this.y += wind.y * SAIL_DOWN_DRIFT * dt;
       }
     } else if (sailsDown) {
       // Furled: no headway, just ride the wind.

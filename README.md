@@ -69,7 +69,8 @@ still running the old one.
 | `F` | Toggle fire mode: broadside volley ↔ rolling single guns |
 | `W` | Furl / set sails — or, on a submarine, toggle the engine |
 | `E` | Submarine only: dive / surface (3 s each) |
-| `S` / `↓` | Drop a barrel mine off the stern |
+| `S` / `↓` | Drop a barrel mine off the stern (surface ships) |
+| `Q` | Drop a depth charge — bursts underwater, hits submerged subs (surface ships) |
 | `Tab` (hold) | Show the scoreboard (career sinks across all rounds) |
 | `Enter` | Open the chat bar (multiplayer) |
 | `P` | Host only: pause / resume the battle |
@@ -97,9 +98,18 @@ line up its own broadside.
 
 The **submarine** is engine-powered (wind doesn't touch it) and can **dive**
 (`E`) and surface — each takes 3 seconds. Submerged, it's invisible to
-everyone else and can't be shot, rammed, or mined… but it can't fire either:
-guns only work fully surfaced. It toggles its **engine** on/off (`W`) instead
-of adjusting sails. The AI sails surface ships only.
+everyone else and can't be shot, rammed, mined, or depth-charged through the
+hull, and it glides **under icebergs** — but islands and piers still reach the
+seabed, so it wrecks on those. It fires **torpedoes** straight off the bow
+(no cannons), and only while fully surfaced. It toggles its **engine** on/off
+(`W`) in place of sails: cut the engine on the surface and it drifts on the
+wind; cut it while submerged and it hangs dead still. It leaves no wake while
+under. The AI sails surface ships only.
+
+Surface ships hunt subs back: a **sonar sweep** pings every few seconds and
+paints a fading contact on any submerged sub, and **depth charges** (`Q`) sink
+for a moment then burst in a wide underwater radius that damages submerged
+subs only — never anything on the surface.
 
 Small ships dodge and harass; large ships are slow-turning fortresses that can
 delete a small ship with one well-placed volley. The enemy's ship type is

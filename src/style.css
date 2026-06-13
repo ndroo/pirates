@@ -90,6 +90,14 @@ canvas {
   font-size: 20px;
 }
 
+#tc-dc {
+  right: calc(252px + env(safe-area-inset-right));
+  width: 56px;
+  height: 56px;
+  bottom: calc(34px + env(safe-area-inset-bottom));
+  font-size: 20px;
+}
+
 #tc-mode.active,
 #tc-sail.active {
   background: rgba(63, 122, 38, 0.6);

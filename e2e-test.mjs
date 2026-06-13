@@ -764,30 +764,109 @@ const diveMs = (await subPage.evaluate(() => performance.now())) - t0;
 if (diveMs < 2200 || diveMs > 4200) throw new Error(`dive took ${Math.round(diveMs)}ms, expected ~3000`);
 console.log(`submarine dove in ${Math.round(diveMs)}ms ✓`);
 
-// Submerged: holding fire produces nothing, and the AI can't target it.
-await subPage.evaluate(() => { window.__game.cannonballs.length = 0; });
+// No wake while submerged (slot 0 is the sub; the AI may still wake).
+await subPage.evaluate(() => { window.__game.wakes.clear(); });
+await subPage.waitForTimeout(400);
+if ((await subPage.evaluate(() => window.__game.wakes.get(0)?.length ?? 0)) !== 0) {
+  throw new Error('submerged submarine left a wake');
+}
+console.log('submerged sub leaves no wake ✓');
+
+// Submerged: holding fire produces no torpedoes, and it's untargetable.
+await subPage.evaluate(() => { window.__game.torpedoes.length = 0; });
 await subPage.keyboard.down('Space');
 await subPage.waitForTimeout(900);
 await subPage.keyboard.up('Space');
-if ((await subPage.evaluate(() => window.__game.cannonballs.length)) !== 0) {
-  throw new Error('submerged submarine fired its guns');
+if ((await subPage.evaluate(() => window.__game.torpedoes.length)) !== 0) {
+  throw new Error('submerged submarine fired');
 }
 console.log('submerged sub cannot fire, and is untargetable ✓');
 
-// Surface (~3s) and confirm the guns come back online.
-await hold(subPage, 'KeyE');
-await subPage.waitForFunction(() => window.__game.slots[0].ship.dive === 0, null, { timeout: 6000, polling: 50 });
+// Radar sweep paints a sonar contact on the submerged sub.
+await subPage.evaluate(() => { window.__game.pings.length = 0; window.__game.pingTimer = 1000; });
+await subPage.waitForFunction(() => window.__game.pings.length > 0, null, { timeout: 2000, polling: 50 });
+console.log('radar ping reveals the submerged sub ✓');
+
+// A depth charge hurts the submerged sub but not a surface ship beside it.
+await subPage.evaluate(() => {
+  const g = window.__game;
+  const sub = g.slots[0].ship;
+  const surf = g.slots[1].ship; // the AI surface ship
+  sub.health = sub.maxHealth;
+  surf.health = surf.maxHealth;
+  sub.x = 400; sub.y = 360;
+  surf.x = 420; surf.y = 360; // well within the blast radius
+  window.__hp = { sub: sub.maxHealth, surf: surf.maxHealth };
+  g.depthCharges.push({ x: 400, y: 360, ownerId: 1, sink: 0.05, spent: false });
+});
+await subPage.waitForFunction(
+  () => {
+    const g = window.__game;
+    return g.depthCharges.length === 0 && g.slots[0].ship.health < window.__hp.sub;
+  },
+  null, { timeout: 3000, polling: 50 },
+);
+const dcResult = await subPage.evaluate(() => ({
+  subDmg: window.__hp.sub - window.__game.slots[0].ship.health,
+  surfDmg: window.__hp.surf - window.__game.slots[1].ship.health,
+}));
+if (dcResult.subDmg <= 0 || dcResult.surfDmg !== 0) throw new Error(`depth charge wrong: ${JSON.stringify(dcResult)}`);
+console.log('depth charge hits the submerged sub, spares the surface ship ✓');
+
+// Submerged, it glides under an iceberg unharmed but still sinks on an island.
 await subPage.evaluate(() => {
   const g = window.__game;
   const s = g.slots[0].ship;
-  s.x = 400; s.y = 360; s.heading = 0; s.gunReload = s.gunReload.map(() => 0);
-  g.slots[1].ship.x = 400; g.slots[1].ship.y = 480;
-  g.cannonballs.length = 0;
+  s.health = s.maxHealth; s.bergSafe = 0;
+  s.x = 300; s.y = 300;
+  g.icebergs = [{ x: 300, y: 300, r: 60, hp: 8, maxHp: 8 }];
+});
+await subPage.waitForTimeout(500);
+if ((await subPage.evaluate(() => window.__game.slots[0].ship.health)) !== (await subPage.evaluate(() => window.__game.slots[0].ship.maxHealth))) {
+  throw new Error('submerged sub took iceberg damage');
+}
+await subPage.evaluate(() => {
+  const g = window.__game;
+  g.icebergs = [];
+  g.islands = [{ x: 300, y: 300, r: 55, craters: [] }];
+  const s = g.slots[0].ship; s.x = 300; s.y = 300;
+});
+await subPage.waitForFunction(() => !window.__game.slots[0].ship.alive, null, { timeout: 3000 });
+console.log('submerged sub passes under icebergs but sinks on islands ✓');
+
+// Surface (~3s) and confirm torpedoes come back online.
+await hold(subPage, 'KeyE');
+await subPage.waitForFunction(() => window.__game.slots[0].ship.dive === 0, null, { timeout: 8000, polling: 50 });
+await subPage.evaluate(() => {
+  const g = window.__game;
+  g.islands = []; g.icebergs = [];
+  const s = g.slots[0].ship;
+  s.health = s.maxHealth; s.x = 400; s.y = 360; s.heading = 0; s.gunReload = s.gunReload.map(() => 0);
+  g.torpedoes.length = 0;
 });
 await subPage.keyboard.down('Space');
-await subPage.waitForFunction(() => window.__game.cannonballs.length > 0, null, { timeout: 4000, polling: 50 });
+await subPage.waitForFunction(() => window.__game.torpedoes.length > 0, null, { timeout: 4000, polling: 50 });
 await subPage.keyboard.up('Space');
-console.log('surfaced submarine fires again ✓');
+console.log('surfaced submarine fires torpedoes ✓');
+
+// Surfaced with the engine cut, the sub drifts on the wind; submerged it holds still.
+await subPage.evaluate(() => {
+  const g = window.__game;
+  g.wind = { dir: 0, strength: 0.35 };
+  const s = g.slots[0].ship;
+  s.x = 200; s.y = 360; s.dive = 0;
+  window.__sx = s.x;
+});
+await hold(subPage, 'KeyW'); // engine off
+await subPage.waitForFunction(() => window.__game.myFurled === true, null, { timeout: 3000 });
+await subPage.waitForTimeout(700);
+const surfDrift = await subPage.evaluate(() => window.__game.slots[0].ship.x - window.__sx);
+if (surfDrift < 20) throw new Error(`surfaced engine-off sub did not drift: ${Math.round(surfDrift)}`);
+await subPage.evaluate(() => { const s = window.__game.slots[0].ship; s.dive = 1; s.x = 200; window.__sx = s.x; });
+await subPage.waitForTimeout(700);
+const subDrift = await subPage.evaluate(() => Math.abs(window.__game.slots[0].ship.x - window.__sx));
+if (subDrift > 4) throw new Error(`submerged engine-off sub drifted: ${Math.round(subDrift)}`);
+console.log('sub drifts surfaced with engine off, holds still submerged ✓');
 await subPage.close();
 
 // --- Scoreboard accumulates a career score across rematches. ---

@@ -1,10 +1,26 @@
 const SPEED = 260; // average px/s over the whole flight
 const MAX_RANGE = 320; // px before the ball splashes into the sea
 const FLIGHT_TIME = MAX_RANGE / SPEED; // s
-// Ballistic feel: ground speed surges at launch and impact and sags through
-// the apex — ±45% around the average, total flight time unchanged.
-const SURGE = 0.45;
 const ARC_LIFT = 16; // px the ball climbs above its shadow at the apex
+
+// Asymmetric ballistic feel: a hard launch, a slow hang at the apex, and a
+// descent that only picks back up to roughly average speed — real shots
+// don't slam into the water as fast as they left the muzzle. The speeds are
+// multiples of the average; they must satisfy V_START + 2*V_APEX + V_END = 4
+// so the ball still covers exactly MAX_RANGE in FLIGHT_TIME.
+const V_START = 1.5;
+const V_APEX = 0.7;
+const V_END = 4 - V_START - 2 * V_APEX; // = 1.1
+
+/** Fraction of the range covered at flight progress p, velocity-continuous. */
+function easedProgress(p: number): number {
+  const m1 = (V_START + V_APEX) / 2;
+  const a1 = (V_START - V_APEX) / 2;
+  const m2 = (V_END + V_APEX) / 2;
+  const a2 = (V_END - V_APEX) / 2;
+  if (p < 0.5) return m1 * p + (a1 * Math.sin(2 * Math.PI * p)) / (2 * Math.PI);
+  return m1 * 0.5 + m2 * (p - 0.5) + (a2 * Math.sin(2 * Math.PI * p)) / (2 * Math.PI);
+}
 
 export class Cannonball {
   x: number; // ground position (the shadow) — used for hit detection
@@ -32,7 +48,7 @@ export class Cannonball {
 
   update(dt: number) {
     this.p = Math.min(1, this.p + dt / FLIGHT_TIME);
-    const eased = this.p + (SURGE * Math.sin(2 * Math.PI * this.p)) / (2 * Math.PI);
+    const eased = easedProgress(this.p);
     this.x = this.startX + this.dirX * MAX_RANGE * eased;
     this.y = this.startY + this.dirY * MAX_RANGE * eased;
     if (this.p >= 1) this.spent = true;

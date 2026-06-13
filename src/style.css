@@ -66,6 +66,57 @@ canvas {
   background: rgba(160, 66, 31, 0.55);
 }
 
+#tc-mine {
+  right: calc(124px + env(safe-area-inset-right));
+  width: 60px;
+  height: 60px;
+  bottom: calc(34px + env(safe-area-inset-bottom));
+  font-size: 22px;
+}
+
+#tc-mode {
+  right: calc(30px + env(safe-area-inset-right));
+  bottom: calc(124px + env(safe-area-inset-bottom));
+  width: 48px;
+  height: 48px;
+  font-size: 18px;
+}
+
+#tc-chat {
+  right: calc(94px + env(safe-area-inset-right));
+  bottom: calc(124px + env(safe-area-inset-bottom));
+  width: 48px;
+  height: 48px;
+  font-size: 18px;
+}
+
+#tc-chat[hidden] {
+  display: none;
+}
+
+#chat-bar {
+  position: fixed;
+  left: 50%;
+  bottom: calc(110px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 6;
+  width: min(420px, 80vw);
+}
+
+#chat-bar[hidden] {
+  display: none;
+}
+
+#chat-bar input {
+  width: 100%;
+  box-sizing: border-box;
+  font: 15px system-ui, sans-serif;
+  padding: 10px 14px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.95);
+}
+
 #lobby {
   position: fixed;
   inset: 0;

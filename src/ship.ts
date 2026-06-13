@@ -38,7 +38,8 @@ export class Ship {
   maxHealth: number;
   health: number;
   guns: number;
-  reload = 0; // s until cannons are ready again
+  gunReload: number[]; // s until each gun is ready again
+  ramSafe = 0; // s of immunity left after being rammed
   sinkProgress = 0; // 0 afloat → 1 fully sunk
 
   readonly type: ShipTypeName;
@@ -62,6 +63,7 @@ export class Ship {
     this.maxHealth = stats.maxHealth;
     this.health = stats.maxHealth;
     this.guns = stats.guns;
+    this.gunReload = new Array(stats.guns).fill(0);
     this.length = stats.length;
     this.width = stats.width;
   }
@@ -74,8 +76,21 @@ export class Ship {
     this.health = Math.max(0, this.health - 1);
   }
 
+  /** All guns loaded — a full broadside is ready. */
+  get allLoaded(): boolean {
+    return this.gunReload.every((r) => r <= 0);
+  }
+
+  /** Index of the next loaded gun, or -1 while everything is reloading. */
+  get nextLoadedGun(): number {
+    return this.gunReload.findIndex((r) => r <= 0);
+  }
+
   update(dt: number, turn: Turn, worldW: number, worldH: number, wind?: { x: number; y: number }) {
-    this.reload = Math.max(0, this.reload - dt);
+    for (let i = 0; i < this.gunReload.length; i++) {
+      this.gunReload[i] = Math.max(0, this.gunReload[i] - dt);
+    }
+    this.ramSafe = Math.max(0, this.ramSafe - dt);
 
     if (!this.alive) {
       this.sinkProgress = Math.min(1, this.sinkProgress + dt / SINK_DURATION);
@@ -190,18 +205,27 @@ export class Ship {
     ctx.restore();
 
     // Smoke billows once the ship is badly hurt — drawn in world space so it
-    // drifts the same way whatever the heading.
-    if (damage >= 0.45 && this.health > 0) {
+    // drifts the same way whatever the heading. It's the headline damage
+    // signal, so it's big, dark, and hard to miss.
+    if (damage >= 0.4 && this.health > 0) {
       const t = performance.now() / 1000;
-      const puffs = damage >= 0.75 ? 4 : 2;
+      const critical = damage >= 0.7;
+      const puffs = critical ? 6 : 3;
       ctx.save();
       for (let i = 0; i < puffs; i++) {
-        const phase = (t * 0.55 + i / puffs + jitter(this.scarSeed, i + 9)) % 1;
-        const px = this.x + Math.sin(t * 1.4 + i * 2.6 + this.scarSeed) * 4 + (i - puffs / 2) * 3;
-        const py = this.y - 6 - phase * 26;
+        const phase = (t * 0.5 + i / puffs + jitter(this.scarSeed, i + 9)) % 1;
+        const px = this.x + Math.sin(t * 1.3 + i * 2.6 + this.scarSeed) * 6 + (i - puffs / 2) * 4;
+        const py = this.y - 8 - phase * 40;
+        const r = 4 + phase * 11;
+        const a = (1 - phase) * (critical ? 0.6 : 0.45) * fade;
+        // dark core with a lighter rim so it reads on the blue sea
         ctx.beginPath();
-        ctx.arc(px, py, 2.5 + phase * 6, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(60, 60, 60, ${(1 - phase) * 0.4 * fade})`;
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(35, 32, 30, ${a})`;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(px - r * 0.25, py - r * 0.25, r * 0.55, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(120, 115, 110, ${a * 0.8})`;
         ctx.fill();
       }
       ctx.restore();

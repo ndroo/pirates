@@ -150,6 +150,84 @@ await host2.waitForFunction(() => !window.__game.slots[0].ship.alive, null, { ti
 await host2.waitForFunction(() => window.__game.slots[0].ship.alive, null, { timeout: 15000 });
 console.log('ship sank on island and respawned ✓');
 
+// --- Rolling fire: F toggles, one gun per press; the ball splashes. ---
+await host2.evaluate(() => {
+  const g = window.__game;
+  g.islands = []; // open water for the ballistics checks
+  const [a, b] = [g.slots[0].ship, g.slots[1].ship];
+  a.x = 300; a.y = 360; a.heading = 0;
+  b.x = 1000; b.y = 600; // out of cannon range
+  g.cannonballs.length = 0;
+  g.splashes.length = 0;
+});
+await hold(host2, 'KeyF');
+await host2.waitForFunction(() => window.__game.myFireMode === 'rolling', null, { timeout: 3000 });
+await hold(host2, 'Space', 80);
+const ballCount = await host2.evaluate(() => window.__game.cannonballs.length);
+if (ballCount !== 1) throw new Error(`rolling fire launched ${ballCount} balls from one press`);
+console.log('rolling fire: one gun per press ✓');
+await host2.waitForFunction(() => window.__game.splashes.length > 0, null, { timeout: 5000 });
+console.log('cannonball splashed into the sea ✓');
+await hold(host2, 'KeyF'); // back to broadsides
+await host2.waitForFunction(() => window.__game.myFireMode === 'volley', null, { timeout: 3000 });
+
+// --- Barrel mines: one afloat at a time, 10s recharge, 2 damage. ---
+await hold(host2, 'KeyS');
+await host2.waitForFunction(() => window.__game.mines.length === 1, null, { timeout: 3000 });
+const mineCool = await host2.evaluate(() => window.__game.slots[0].mineCool);
+if (mineCool < 8) throw new Error(`mine recharge not engaged (${mineCool})`);
+await hold(host2, 'KeyS');
+if ((await host2.evaluate(() => window.__game.mines.length)) !== 1) {
+  throw new Error('dropped a second barrel while one was afloat');
+}
+await host2.waitForFunction(() => window.__game.mines[0]?.armed, null, { timeout: 4000 });
+await guest3.waitForFunction(() => window.__game.remoteMines.length === 1, null, { timeout: 5000 });
+await host2.evaluate(() => {
+  const g = window.__game;
+  const mine = g.mines[0];
+  const victim = g.slots[1].ship;
+  victim.health = victim.maxHealth; // small ship: 3
+  victim.x = mine.x;
+  victim.y = mine.y;
+});
+await host2.waitForFunction(
+  () => window.__game.mines.length === 0 && window.__game.slots[1].ship.health === 1,
+  null, { timeout: 5000 },
+);
+console.log('barrel mine: single stock, recharge, 2 damage on contact ✓');
+
+// --- Ramming: a bow in the hull costs half max health. ---
+await host2.evaluate(() => {
+  const g = window.__game;
+  const [a, b] = [g.slots[0].ship, g.slots[1].ship];
+  a.health = a.maxHealth;
+  b.health = b.maxHealth;
+  b.x = 600; b.y = 400; b.heading = 0;
+  a.heading = 0; a.y = 400;
+  a.x = 600 - b.length / 2 - a.length / 2 + 8; // bow buried in their stern
+});
+await host2.waitForFunction(
+  () => window.__game.slots[1].ship.health === window.__game.slots[1].ship.maxHealth - Math.ceil(window.__game.slots[1].ship.maxHealth / 2),
+  null, { timeout: 3000 },
+);
+console.log('ramming takes half max health ✓');
+
+// --- Banter relays both ways and shows in the feed. ---
+await guest3.keyboard.press('Enter');
+await guest3.waitForSelector('#chat-bar:not([hidden])', { timeout: 3000 });
+await guest3.fill('#chat-input', 'arr, nice shot!');
+await guest3.keyboard.press('Enter');
+await host2.waitForFunction(
+  () => window.__game.chats.some((c) => c.from === 1 && c.text === 'arr, nice shot!'),
+  null, { timeout: 5000 },
+);
+await host2.keyboard.press('Enter');
+await host2.waitForSelector('#chat-bar:not([hidden])', { timeout: 3000 });
+await host2.fill('#chat-input', 'prepare to be boarded');
+await host2.keyboard.press('Enter');
+await guest3.waitForFunction(() => window.__game.chats.some((c) => c.from === 0), null, { timeout: 5000 });
+console.log('banter relayed both ways ✓');
+
 await host2.keyboard.down('Space'); // both auto-aim and blast away
 await guest3.keyboard.down('Space');
 
@@ -365,8 +443,11 @@ console.log('mobile: tapped a ship card into battle ✓');
 if (!(await phone.isVisible('#tc-fire'))) throw new Error('touch controls not shown on phone');
 
 await phone.locator('#tc-fire').dispatchEvent('pointerdown');
-await phone.waitForTimeout(400);
-const fired = await phone.evaluate(() => window.__game.cannonballs.length > 0);
+// Poll per frame: a ball can hit an island and despawn within a fixed sleep.
+const fired = await phone
+  .waitForFunction(() => window.__game.cannonballs.length > 0, null, { timeout: 3000, polling: 'raf' })
+  .then(() => true)
+  .catch(() => false);
 await phone.locator('#tc-fire').dispatchEvent('pointerup');
 if (!fired) throw new Error('FIRE button produced no cannonballs');
 
@@ -386,6 +467,20 @@ await phone.waitForTimeout(300);
 await phone.tap('canvas', { position: { x: canvasBox.width / 2, y: canvasBox.height / 2 } });
 await phone.waitForFunction(() => window.__game.phase === 'select', null, { timeout: 5000 });
 console.log('mobile: tap-to-restart works ✓');
+
+// Rematch select: the countdown reuses the previous ship automatically.
+const armed = await phone.evaluate(() => {
+  const g = window.__game;
+  if (!g.lastPick || !g.autoPickAt) return false;
+  g.autoPickAt = Date.now(); // fast-forward the 10s countdown
+  return true;
+});
+if (!armed) throw new Error('rematch auto-pick countdown not armed');
+await phone.waitForFunction(
+  () => window.__game.phase === 'battle' && window.__game.slots[0].pick === 'medium',
+  null, { timeout: 5000 },
+);
+console.log('rematch auto-picked the previous ship ✓');
 await phoneCtx.close();
 
 // --- Invite screen offers a solo escape hatch. ---

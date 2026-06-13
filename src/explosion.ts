@@ -1,4 +1,46 @@
 const DURATION = 0.5; // s
+const SPLASH_DURATION = 0.55; // s
+
+/** A ring of white water where a cannonball (or fizzling barrel) lands. */
+export class Splash {
+  x: number;
+  y: number;
+  private age = 0;
+
+  constructor(x: number, y: number) {
+    this.x = x;
+    this.y = y;
+  }
+
+  get done(): boolean {
+    return this.age >= SPLASH_DURATION;
+  }
+
+  update(dt: number) {
+    this.age += dt;
+  }
+
+  draw(ctx: CanvasRenderingContext2D) {
+    const t = Math.min(this.age / SPLASH_DURATION, 1);
+    ctx.save();
+
+    // expanding foam ring
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, 3 + 15 * t, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(255, 255, 255, ${0.75 * (1 - t)})`;
+    ctx.lineWidth = 2.5 * (1 - t) + 0.5;
+    ctx.stroke();
+
+    // white plume that leaps up and falls back
+    const leap = Math.sin(Math.PI * Math.min(t * 1.4, 1));
+    ctx.beginPath();
+    ctx.ellipse(this.x, this.y - leap * 8, 2.5, 2.5 + leap * 5, 0, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(230, 243, 255, ${0.8 * (1 - t)})`;
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
 
 interface Spark {
   dx: number; // px/s

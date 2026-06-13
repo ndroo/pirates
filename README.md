@@ -62,10 +62,17 @@ still running the old one.
 
 | Key | Action |
 | --- | --- |
-| `1` / `2` / `3` | Choose your ship (small / medium / large) |
+| `1` / `2` / `3` | Choose your ship (small / medium / large) — or click/tap a card |
 | `←` / `→` or `A` / `D` | Steer left / right |
-| `Space` | Fire a broadside |
+| `Space` | Fire (full broadside, or one gun per press in rolling mode) |
+| `F` | Toggle fire mode: broadside volley ↔ rolling single guns |
+| `S` / `↓` | Drop a barrel mine off the stern |
+| `Enter` | Open the chat bar (multiplayer) |
 | `R` | After a battle ends, return to ship select |
+
+On phones, on-screen buttons cover steering, FIRE, the barrel, the fire-mode
+toggle, and chat; ship select and rematches work by tapping. On a rematch
+select screen a 10s countdown reuses your previous ship unless you repick.
 
 Your ship is always under sail and moves forward on its own — you only steer,
 just like in the original Pirates!. Cannons fire a broadside from whichever
@@ -97,6 +104,21 @@ chosen at random each battle. All type stats live in one table
   is a valid target — there are no teams.
 - Multiplayer fleets spawn evenly spaced on a ring around the arena's center,
   each ship heading along the ring.
+- Two fire modes (`F`): a full **broadside volley** once every gun is loaded,
+  or **rolling fire** — one gun per press, each gun reloading independently.
+  Recharge bars for the guns and the barrel sit bottom-center.
+- **Barrel mines** (`S`): one afloat at a time, 10s recharge. They arm after
+  1.5s, drift with the wind, and deal 2 damage on contact — to anyone,
+  including the dropper. Each barrel rolls a 10–20s fuse: most self-detonate
+  with an area blast; ~25% are duds that fizzle out. Cannonballs detonate
+  them harmlessly.
+- **Ramming**: burying your bow in another hull costs them half their max
+  health (a short immunity stops one collision from landing twice).
+- Cannonballs fly a visible ballistic arc and splash where they land; badly
+  hurt ships scorch, tatter, and pour smoke.
+- **Banter** (`Enter`): messages relay through the host and appear as speech
+  bubbles over the sender's ship plus a feed bottom-left — including over the
+  victory banner, for dignified post-battle discussion.
 - Cannonballs have a maximum range (~320 px) and splash harmlessly past it.
 - Hit detection tests each ball against the target ship's rotated bounding box.
 - The player reloads faster than the enemy (1.4 s vs 2.2 s) to offset the AI's

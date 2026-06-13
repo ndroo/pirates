@@ -82,15 +82,46 @@ function setBusy(busy: boolean) {
 function startGame(mode: GameMode): Game {
   lobby.remove();
   const input = new Input();
-  enableTouchControls(input);
   const game = new Game(ctx, input, mode);
   (window as { __game?: Game }).__game = game; // for the e2e smoke test
+  enableTouchControls(input, game, mode.kind !== 'solo');
+  if (mode.kind !== 'solo') enableChatBar(game);
   game.start();
   return game;
 }
 
-/** On-screen steer/fire buttons for touch devices, feeding the key state. */
-function enableTouchControls(input: Input) {
+/** Enter opens a chat bar; Enter again sends, Escape cancels. */
+function enableChatBar(game: Game) {
+  const bar = document.getElementById('chat-bar') as HTMLDivElement;
+  const field = document.getElementById('chat-input') as HTMLInputElement;
+  const close = () => {
+    bar.hidden = true;
+    field.value = '';
+    field.blur();
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && bar.hidden) {
+      bar.hidden = false;
+      field.focus();
+    }
+  });
+  field.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      game.sendChat(field.value);
+      close();
+    } else if (e.key === 'Escape') {
+      close();
+    }
+  });
+  (window as { __openChat?: () => void }).__openChat = () => {
+    bar.hidden = false;
+    field.focus();
+  };
+}
+
+/** On-screen buttons for touch devices, feeding the key state. */
+function enableTouchControls(input: Input, game: Game, multiplayer: boolean) {
   if (!matchMedia('(pointer: coarse)').matches) return;
   const controls = document.getElementById('touch-controls') as HTMLDivElement;
   controls.hidden = false;
@@ -112,6 +143,17 @@ function enableTouchControls(input: Input) {
   bind('tc-left', 'ArrowLeft');
   bind('tc-right', 'ArrowRight');
   bind('tc-fire', 'Space');
+  bind('tc-mine', 'KeyS');
+  document.getElementById('tc-mode')!.addEventListener('click', () => game.toggleFireMode());
+  const chatBtn = document.getElementById('tc-chat') as HTMLButtonElement;
+  if (multiplayer) {
+    chatBtn.hidden = false;
+    chatBtn.addEventListener('click', () => {
+      const bar = document.getElementById('chat-bar') as HTMLDivElement;
+      bar.hidden = false;
+      (document.getElementById('chat-input') as HTMLInputElement).focus();
+    });
+  }
 }
 
 /** In-game admin controls, shown only on the host's screen. */

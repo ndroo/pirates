@@ -3,6 +3,9 @@ export class Input {
 
   constructor() {
     window.addEventListener('keydown', (e) => {
+      // Typing in a text field (e.g. the chat bar) must not steer the ship.
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
       this.down.add(e.code);
       // Keep Space/arrows from scrolling the page.
       if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();

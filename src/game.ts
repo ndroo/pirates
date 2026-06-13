@@ -1,8 +1,19 @@
 import { decideTurn, wantsToFire } from './ai';
 import { Cannonball, drawCannonball } from './cannonball';
-import { Explosion } from './explosion';
+import { Explosion, Splash } from './explosion';
 import type { Input } from './input';
-import type { BattleMode, GuestNet, HostNet, Island, NetMessage, ShipSnap, Wind } from './net';
+import { cleanChat } from './net';
+import type {
+  BattleMode,
+  FireMode,
+  GuestNet,
+  HostNet,
+  Island,
+  MineSnap,
+  NetMessage,
+  ShipSnap,
+  Wind,
+} from './net';
 import { Ship, SHIP_TYPES, type ShipTypeName, type Turn } from './ship';
 
 // Fixed logical arena so all players see the same battlefield; the canvas is
@@ -17,6 +28,37 @@ const RESPAWN_DELAY = 3; // s between fully sinking and reappearing
 const SINK_TARGET = 5; // respawn mode: sinks needed to win the round
 const MIN_ISLANDS = 4;
 const MAX_ISLANDS = 7;
+
+const MINE_ARM_TIME = 1.5; // s before a dropped barrel goes live
+const MINE_RADIUS = 7; // px contact radius
+const MINE_BLAST = 45; // px radius when the fuse detonates it
+const MINE_DAMAGE = 2; // health per hit (cannonballs do 1)
+const MINE_RECHARGE = 10; // s before the next barrel is ready (one afloat at a time)
+const MINE_DRIFT = 14; // px/s per unit of wind strength
+const MINE_DUD_CHANCE = 0.25; // "bad fuse": fizzles instead of self-detonating
+
+const RAM_SAFE = 1.2; // s of immunity after taking a ram, so one hit ≠ many
+
+const AUTO_PICK_AFTER = 10; // s on a rematch select before your last ship is reused
+
+/** A floating barrel bomb. Lives until contact, its fuse, or a cannonball. */
+interface Mine {
+  x: number;
+  y: number;
+  ownerId: number;
+  age: number; // s afloat
+  fuse: number; // s until it self-detonates (or fizzles, for a dud)
+  dud: boolean;
+  armed: boolean;
+  spent: boolean;
+}
+
+/** An on-screen chat line; bubbles use `until`, the feed keeps the last few. */
+interface ChatLine {
+  from: number;
+  text: string;
+  until: number; // ms epoch when it disappears
+}
 
 // One distinct hull color per player slot (host is 0).
 export const PLAYER_COLORS = [
@@ -58,8 +100,11 @@ interface Slot {
   ai: boolean;
   pick: ShipTypeName | null;
   ship: Ship | null;
-  input: { turn: Turn; fire: boolean; restart: boolean }; // latest remote keys
+  input: { turn: Turn; fire: boolean; drop: boolean; restart: boolean }; // latest remote keys
   score: number; // ships sunk (respawn mode)
+  mineCool: number; // s until the next barrel is ready
+  fireMode: FireMode;
+  prevFire: boolean; // for edge-detecting presses in rolling mode
   respawnIn: number | null; // s until respawn, once fully sunk
   left: boolean; // disconnected mid-battle; never respawns
   avoid: Turn; // AI: committed island-avoidance turn (0 = clear course)
@@ -73,8 +118,11 @@ function newSlot(id: number, name = '', ai = false): Slot {
     ai,
     pick: null,
     ship: null,
-    input: { turn: 0, fire: false, restart: false },
+    input: { turn: 0, fire: false, drop: false, restart: false },
     score: 0,
+    mineCool: 0,
+    fireMode: 'volley',
+    prevFire: false,
     respawnIn: null,
     left: false,
     avoid: 0,
@@ -95,6 +143,15 @@ export class Game {
   private cannonballs: Cannonball[] = [];
   private explosions: Explosion[] = [];
   private islands: Island[] = [];
+  private mines: Mine[] = [];
+  private remoteMines: MineSnap[] = []; // guest: mines from snapshots
+  private splashes: Splash[] = [];
+  private pendingSplash: { x: number; y: number }[] = []; // host: splashes to send
+  private chats: ChatLine[] = []; // recent banter, for the feed and bubbles
+  private myFireMode: FireMode = 'volley';
+  private prevKeyF = false; // edge detection for the fire-mode toggle
+  private lastPick: ShipTypeName | null = null; // previous round's ship
+  private autoPickAt: number | null = null; // ms epoch when lastPick is auto-used
   private wind: Wind = { dir: 0, strength: 0 };
   private waves: Wave[] = [];
   private lastTime = 0;
@@ -186,6 +243,10 @@ export class Game {
     return this.aliveSlots.length <= 1;
   }
 
+  private mineSnaps(): MineSnap[] {
+    return this.mines.map((m) => ({ x: m.x, y: m.y, armed: m.armed, urgency: m.age / m.fuse }));
+  }
+
   private get windVec(): { x: number; y: number } {
     return {
       x: Math.cos(this.wind.dir) * this.wind.strength,
@@ -237,7 +298,40 @@ export class Game {
       }
       // Picked while the round-over banner is up: they sail next round.
     } else if (msg.t === 'input') {
-      slot.input = { turn: msg.turn, fire: msg.fire, restart: msg.restart };
+      slot.input = { turn: msg.turn, fire: msg.fire, drop: msg.drop, restart: msg.restart };
+      slot.fireMode = msg.mode;
+    } else if (msg.t === 'chat') {
+      const text = cleanChat(msg.text);
+      if (!text || this.mode.kind !== 'host') return;
+      this.recordChat(id, text);
+      for (const gid of this.mode.net.guestIds) {
+        if (gid !== id) this.mode.net.sendTo(gid, { t: 'chat', text, from: id });
+      }
+    }
+  }
+
+  /** Show a chat line in the feed and as a bubble over the sender's ship. */
+  private recordChat(from: number, text: string) {
+    this.chats.push({ from, text, until: Date.now() + 6500 });
+    if (this.chats.length > 12) this.chats.shift();
+  }
+
+  /** Swap between full broadsides and one-gun-per-press (F key / mode button). */
+  toggleFireMode() {
+    this.myFireMode = this.myFireMode === 'volley' ? 'rolling' : 'volley';
+    const self = this.selfSlot;
+    if (self) self.fireMode = this.myFireMode;
+  }
+
+  /** Send banter to the crew (called by the chat bar in main.ts). */
+  sendChat(raw: string) {
+    const text = cleanChat(raw);
+    if (!text || this.mode.kind === 'solo') return;
+    this.recordChat(this.selfId, text);
+    if (this.mode.kind === 'host') {
+      this.mode.net.broadcast({ t: 'chat', text, from: 0 });
+    } else {
+      this.mode.net.send({ t: 'chat', text });
     }
   }
 
@@ -253,6 +347,7 @@ export class Game {
   private spawnLatecomer(slot: Slot) {
     if (this.mode.kind !== 'host') return;
     this.spawnShip(slot, Math.random() * Math.PI * 2); // the ring is island-free
+    slot.mineCool = 0;
     const net = this.mode.net;
     const spawn = {
       id: slot.id,
@@ -269,6 +364,7 @@ export class Game {
       target: this.target,
       islands: this.islands,
       wind: this.wind,
+      mines: this.mineSnaps(),
       ships: this.slots
         .filter((s) => s.ship)
         .map((s) => ({ id: s.id, name: s.name, type: s.pick!, x: s.ship!.x, y: s.ship!.y, heading: s.ship!.heading })),
@@ -291,6 +387,11 @@ export class Game {
         this.kicked = true;
         this.disconnected = true;
         break;
+      case 'chat': {
+        const text = cleanChat(msg.text);
+        if (text) this.recordChat(msg.from ?? -1, text);
+        break;
+      }
       case 'picked':
         this.readyInfo = { ready: msg.ready, total: msg.total };
         break;
@@ -305,6 +406,7 @@ export class Game {
         });
         this.islands = msg.islands;
         this.wind = msg.wind;
+        this.remoteMines = msg.mines;
         this.cannonballs = [];
         this.remoteBalls = [];
         this.explosions = [];
@@ -322,7 +424,9 @@ export class Game {
         if (this.phase !== 'battle') break;
         for (const snap of msg.ships) this.applySnap(snap);
         this.remoteBalls = msg.balls;
+        this.remoteMines = msg.mines;
         for (const b of msg.boom) this.explosions.push(new Explosion(b.x, b.y));
+        for (const s of msg.splash) this.splashes.push(new Splash(s.x, s.y));
         break;
     }
   }
@@ -331,7 +435,9 @@ export class Game {
     const slot = this.slots.find((s) => s.id === snap.id);
     if (!slot?.ship) return;
     slot.score = snap.score;
+    slot.mineCool = snap.mineCool;
     const ship = slot.ship;
+    ship.gunReload = snap.guns;
     ship.x = snap.x;
     ship.y = snap.y;
     ship.heading = snap.heading;
@@ -361,6 +467,10 @@ export class Game {
 
   private resetToSelect() {
     this.phase = 'select';
+    // Rematch convenience: your previous ship sails again unless you pick
+    // another within the countdown.
+    this.lastPick = this.myPick ?? this.lastPick;
+    this.autoPickAt = this.lastPick ? Date.now() + AUTO_PICK_AFTER * 1000 : null;
     this.myPick = null;
     this.tapRestart = false;
     this.readyInfo = null;
@@ -368,6 +478,10 @@ export class Game {
     this.remoteBalls = [];
     this.explosions = [];
     this.pendingBoom = [];
+    this.mines = [];
+    this.remoteMines = [];
+    this.splashes = [];
+    this.pendingSplash = [];
     this.buildSlots();
     if (this.mode.kind === 'host') {
       this.mode.net.broadcast({ t: 'go-select' });
@@ -438,6 +552,8 @@ export class Game {
     });
     this.islands = this.makeIslands();
     this.wind = { dir: Math.random() * Math.PI * 2, strength: 0.08 + Math.random() * 0.32 };
+    this.mines = [];
+    for (const slot of this.slots) slot.mineCool = 0;
     this.cannonballs = [];
     this.explosions = [];
     this.pendingBoom = [];
@@ -450,6 +566,7 @@ export class Game {
         target: this.target,
         islands: this.islands,
         wind: this.wind,
+      mines: this.mineSnaps(),
         ships: this.slots.map((s) => ({
           id: s.id,
           name: s.name,
@@ -562,6 +679,10 @@ export class Game {
       wave.y = (wave.y + this.windVec.y * 60 * dt + WORLD_H) % WORLD_H;
     }
 
+    const keyF = this.input.isDown('KeyF');
+    if (keyF && !this.prevKeyF) this.toggleFireMode();
+    this.prevKeyF = keyF;
+
     let turn: Turn = 0;
     if (this.input.isDown('ArrowLeft') || this.input.isDown('KeyA')) turn = -1;
     if (this.input.isDown('ArrowRight') || this.input.isDown('KeyD')) turn = 1;
@@ -571,11 +692,15 @@ export class Game {
         t: 'input',
         turn,
         fire: this.input.isDown('Space'),
+        drop: this.input.isDown('KeyS') || this.input.isDown('ArrowDown'),
         restart: this.over && (this.input.isDown('KeyR') || this.tapRestart),
+        mode: this.myFireMode,
       });
-      // The host simulates; we just animate our local explosion effects.
+      // The host simulates; we just animate our local effects.
       for (const ex of this.explosions) ex.update(dt);
       this.explosions = this.explosions.filter((ex) => !ex.done);
+      for (const sp of this.splashes) sp.update(dt);
+      this.splashes = this.splashes.filter((sp) => !sp.done);
       return;
     }
 
@@ -601,9 +726,11 @@ export class Game {
 
       let shipTurn: Turn = 0;
       let fire = false;
+      let drop = false;
       if (slot.id === this.selfId) {
         shipTurn = turn;
         fire = this.input.isDown('Space');
+        drop = this.input.isDown('KeyS') || this.input.isDown('ArrowDown');
       } else if (slot.ai) {
         const target = this.nearestEnemy(ship);
         shipTurn = this.aiTurn(slot, ship, target);
@@ -611,6 +738,7 @@ export class Game {
       } else {
         shipTurn = slot.input.turn;
         fire = slot.input.fire;
+        drop = slot.input.drop;
       }
 
       ship.update(dt, shipTurn, WORLD_W, WORLD_H, this.windVec);
@@ -627,14 +755,62 @@ export class Game {
         }
       }
 
-      if (!this.over && fire && ship.alive && ship.reload <= 0) {
+      const firePressed = fire && !slot.prevFire;
+      slot.prevFire = fire;
+      if (!this.over && ship.alive) {
         const target = this.nearestEnemy(ship);
-        if (target) this.fireBroadside(slot, target);
+        if (target) {
+          if (slot.fireMode === 'volley') {
+            // Hold to loose the full broadside as soon as every gun is ready.
+            if (fire && ship.allLoaded) {
+              this.fireGuns(slot, target, ship.gunReload.map((_, i) => i));
+            }
+          } else if (firePressed && ship.nextLoadedGun >= 0) {
+            // Rolling fire: each press discharges the next loaded gun.
+            this.fireGuns(slot, target, [ship.nextLoadedGun]);
+          }
+        }
+      }
+
+      slot.mineCool = Math.max(0, slot.mineCool - dt);
+      const hasMineAfloat = this.mines.some((m) => m.ownerId === slot.id && !m.spent);
+      if (!this.over && drop && ship.alive && slot.mineCool <= 0 && !hasMineAfloat) {
+        this.mines.push({
+          x: ship.x - Math.cos(ship.heading) * (ship.length / 2 + 14), // off the stern
+          y: ship.y - Math.sin(ship.heading) * (ship.length / 2 + 14),
+          ownerId: slot.id,
+          age: 0,
+          fuse: 10 + Math.random() * 10,
+          dud: Math.random() < MINE_DUD_CHANCE,
+          armed: false,
+          spent: false,
+        });
+        slot.mineCool = MINE_RECHARGE;
       }
     }
 
+    this.resolveRams();
+    this.updateMines(dt);
+
     for (const ball of this.cannonballs) {
       ball.update(dt);
+      if (ball.p >= 1) {
+        // Flew its full range: splash into the sea.
+        this.splashes.push(new Splash(ball.x, ball.y));
+        this.pendingSplash.push({ x: ball.x, y: ball.y });
+        continue;
+      }
+      if (ball.spent) continue;
+      // Cannonballs detonate barrels harmlessly — the counter to a minefield.
+      for (const mine of this.mines) {
+        if (!mine.spent && Math.hypot(ball.x - mine.x, ball.y - mine.y) < MINE_RADIUS + 3) {
+          mine.spent = true;
+          ball.spent = true;
+          this.explosions.push(new Explosion(mine.x, mine.y));
+          this.pendingBoom.push({ x: mine.x, y: mine.y });
+          break;
+        }
+      }
       if (ball.spent) continue;
       for (const isl of this.islands) {
         if (Math.hypot(ball.x - isl.x, ball.y - isl.y) < isl.r) {
@@ -663,6 +839,8 @@ export class Game {
 
     for (const ex of this.explosions) ex.update(dt);
     this.explosions = this.explosions.filter((ex) => !ex.done);
+    for (const sp of this.splashes) sp.update(dt);
+    this.splashes = this.splashes.filter((sp) => !sp.done);
 
     if (this.mode.kind === 'host') {
       this.mode.net.broadcast({
@@ -675,11 +853,16 @@ export class Game {
           health: s.ship!.health,
           sink: s.ship!.sinkProgress,
           score: s.score,
+          guns: s.ship!.gunReload,
+          mineCool: s.mineCool,
         })),
         balls: this.cannonballs.map((b) => ({ x: b.x, y: b.y, p: b.p })),
+        mines: this.mineSnaps(),
         boom: this.pendingBoom,
+        splash: this.pendingSplash,
       });
       this.pendingBoom = [];
+      this.pendingSplash = [];
     }
   }
 
@@ -700,18 +883,105 @@ export class Game {
     this.maybeStartBattle();
   }
 
+  /**
+   * Ramming: a bow buried in another hull costs the rammed ship half its max
+   * health. A short immunity keeps one collision from landing every frame;
+   * head-on collisions gore both ships.
+   */
+  private resolveRams() {
+    if (this.over) return;
+    for (const attacker of this.slots) {
+      const ram = attacker.ship;
+      if (!ram?.alive) continue;
+      const bowX = ram.x + (Math.cos(ram.heading) * ram.length) / 2;
+      const bowY = ram.y + (Math.sin(ram.heading) * ram.length) / 2;
+      for (const victim of this.slots) {
+        if (victim === attacker) continue;
+        const hull = victim.ship;
+        if (!hull?.alive || hull.ramSafe > 0 || !hull.containsPoint(bowX, bowY)) continue;
+        hull.ramSafe = RAM_SAFE;
+        const dmg = Math.ceil(hull.maxHealth / 2);
+        for (let i = 0; i < dmg; i++) hull.takeHit();
+        if (!hull.alive) attacker.score++;
+        this.explosions.push(new Explosion(bowX, bowY));
+        this.pendingBoom.push({ x: bowX, y: bowY });
+      }
+    }
+  }
+
+  /** Host/solo: drift, arming, fuses, and contact/blast damage for barrels. */
+  private updateMines(dt: number) {
+    for (const mine of this.mines) {
+      mine.age += dt;
+      mine.armed = mine.age >= MINE_ARM_TIME;
+
+      // Barrels ride the wind, but beach against islands.
+      const nx = mine.x + this.windVec.x * MINE_DRIFT * dt * 4;
+      const ny = mine.y + this.windVec.y * MINE_DRIFT * dt * 4;
+      if (this.islands.every((i) => Math.hypot(nx - i.x, ny - i.y) > i.r + MINE_RADIUS)) {
+        mine.x = nx;
+        mine.y = ny;
+      }
+
+      if (mine.age >= mine.fuse) {
+        // The fuse runs out: most barrels blast everything nearby; a dud
+        // just fizzles into the sea with a splash.
+        mine.spent = true;
+        if (!mine.dud) {
+          this.detonate(mine, MINE_BLAST);
+        } else {
+          this.splashes.push(new Splash(mine.x, mine.y));
+          this.pendingSplash.push({ x: mine.x, y: mine.y });
+        }
+        continue;
+      }
+
+      if (!mine.armed || this.over) continue;
+      for (const slot of this.slots) {
+        const ship = slot.ship;
+        if (!ship?.alive) continue;
+        if (Math.hypot(ship.x - mine.x, ship.y - mine.y) < MINE_RADIUS + ship.width / 2) {
+          mine.spent = true;
+          this.detonate(mine, MINE_BLAST);
+          break;
+        }
+      }
+    }
+    this.mines = this.mines.filter((m) => !m.spent);
+  }
+
+  /** Blow a barrel: damage every ship in the blast and credit the owner. */
+  private detonate(mine: Mine, radius: number) {
+    for (const slot of this.slots) {
+      const ship = slot.ship;
+      if (!ship?.alive) continue;
+      if (Math.hypot(ship.x - mine.x, ship.y - mine.y) > radius + ship.width / 2) continue;
+      for (let i = 0; i < MINE_DAMAGE; i++) ship.takeHit();
+      if (!ship.alive && slot.id !== mine.ownerId) {
+        const owner = this.slots.find((s) => s.id === mine.ownerId);
+        if (owner) owner.score++;
+      }
+    }
+    this.explosions.push(new Explosion(mine.x, mine.y));
+    this.explosions.push(new Explosion(mine.x + 6, mine.y - 5));
+    this.pendingBoom.push({ x: mine.x, y: mine.y }, { x: mine.x + 6, y: mine.y - 5 });
+  }
+
   private updateSelect() {
     if (this.myPick) return;
     for (const [code, type] of Object.entries(SELECT_KEYS)) {
       if (this.input.isDown(code)) {
         this.pick(type);
-        break;
+        return;
       }
+    }
+    if (this.lastPick && this.autoPickAt !== null && Date.now() >= this.autoPickAt) {
+      this.pick(this.lastPick);
     }
   }
 
-  /** Fire a volley from whichever side of the shooter faces the target. */
-  private fireBroadside(shooterSlot: Slot, target: Ship) {
+  /** Fire the given guns from whichever side of the shooter faces the target. */
+  private fireGuns(shooterSlot: Slot, target: Ship, gunIndices: number[]) {
     const shooter = shooterSlot.ship!;
     const reload = shooterSlot.ai ? AI_RELOAD : PLAYER_RELOAD;
     const bearing = Math.atan2(target.y - shooter.y, target.x - shooter.x);
@@ -723,7 +993,7 @@ export class Game {
     const sx = Math.cos(dir);
     const sy = Math.sin(dir);
 
-    for (let i = 0; i < shooter.guns; i++) {
+    for (const i of gunIndices) {
       const along = (i / (shooter.guns - 1) - 0.5) * (shooter.length / 2);
       this.cannonballs.push(
         new Cannonball(
@@ -733,8 +1003,8 @@ export class Game {
           shooterSlot.id,
         ),
       );
+      shooter.gunReload[i] = reload;
     }
-    shooter.reload = reload;
   }
 
   // --- rendering ---
@@ -746,6 +1016,8 @@ export class Game {
     } else {
       const ctx = this.ctx;
       this.drawIslands();
+      this.drawMines();
+      for (const sp of this.splashes) sp.draw(ctx);
       if (this.mode.kind === 'guest') {
         for (const ball of this.remoteBalls) drawCannonball(ctx, ball.x, ball.y, ball.p);
       } else {
@@ -754,16 +1026,19 @@ export class Game {
       for (const slot of this.slots) slot.ship?.draw(ctx);
       for (const slot of this.slots) this.drawShipTag(slot);
       for (const ex of this.explosions) ex.draw(ctx);
+      this.drawChatBubbles();
 
       this.slots.forEach((slot, row) => {
         if (slot.ship) this.drawHealthRow(slot, row);
       });
 
       this.drawWind();
+      this.drawWeaponBars();
       this.drawRespawnNotice();
       if (this.over) this.drawGameOver();
     }
 
+    this.drawChatFeed();
     if (this.disconnected) this.drawDisconnected();
   }
 
@@ -862,6 +1137,25 @@ export class Game {
       ctx.fillText(`${stats.guns} guns · ${SPEED_LABELS[type]} · ${stats.maxHealth} hits to sink`, x, y + 94);
     });
 
+    // Rematch countdown: the previous ship is reused unless they repick.
+    if (!this.myPick && this.lastPick && this.autoPickAt !== null) {
+      const left = Math.max(0, this.autoPickAt - Date.now()) / 1000;
+      const barW = 320;
+      const y = h * 0.7;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+      ctx.font = '15px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(
+        `Sailing the ${this.lastPick} again in ${Math.ceil(left)}s — pick any ship to change`,
+        w / 2,
+        y - 14,
+      );
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.fillRect(w / 2 - barW / 2, y, barW, 8);
+      ctx.fillStyle = '#ffd75e';
+      ctx.fillRect(w / 2 - barW / 2, y, barW * (left / AUTO_PICK_AFTER), 8);
+    }
+
     ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
     ctx.font = '17px system-ui, sans-serif';
     const howToPick = TOUCH ? 'Tap a ship to choose it' : 'Press 1, 2 or 3 to choose your ship';
@@ -918,6 +1212,136 @@ export class Game {
       ctx.fillStyle = i < ship.health ? '#4caf50' : 'rgba(255, 255, 255, 0.25)';
       ctx.fillRect(x0 + i * (segW + gap), y, segW, segH);
     }
+  }
+
+  /** Floating barrels: brown kegs whose warning light blinks faster near the end. */
+  private drawMines() {
+    const ctx = this.ctx;
+    const t = performance.now() / 1000;
+    const snaps = this.mode.kind === 'guest' ? this.remoteMines : this.mineSnaps();
+    for (const mine of snaps) {
+      ctx.save();
+      ctx.translate(mine.x, mine.y);
+      ctx.beginPath();
+      ctx.arc(0, 0, MINE_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = mine.armed ? '#7a5230' : 'rgba(122, 82, 48, 0.55)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      // barrel hoops
+      ctx.beginPath();
+      ctx.moveTo(-MINE_RADIUS + 1, -2.5);
+      ctx.lineTo(MINE_RADIUS - 1, -2.5);
+      ctx.moveTo(-MINE_RADIUS + 1, 2.5);
+      ctx.lineTo(MINE_RADIUS - 1, 2.5);
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      // warning light: blinks faster as the fuse burns down
+      if (mine.armed && Math.sin(t * (4 + mine.urgency * 14)) > 0) {
+        ctx.beginPath();
+        ctx.arc(0, 0, 2, 0, Math.PI * 2);
+        ctx.fillStyle = '#ff4136';
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  /** Speech bubbles over the ships of recent talkers. */
+  private drawChatBubbles() {
+    const ctx = this.ctx;
+    const now = Date.now();
+    for (const slot of this.slots) {
+      const ship = slot.ship;
+      if (!ship || ship.sinkProgress >= 1) continue;
+      // Bubbles show for the first 4s of a line's 6.5s feed lifetime.
+      const line = [...this.chats].reverse().find((c) => c.from === slot.id && now < c.until - 2500);
+      if (!line) continue;
+      ctx.font = '13px system-ui, sans-serif';
+      const w = Math.min(ctx.measureText(line.text).width + 14, 240);
+      const x = ship.x;
+      const y = ship.y - ship.length / 2 - 26;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+      ctx.beginPath();
+      ctx.roundRect(x - w / 2, y - 18, w, 22, 8);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(x - 4, y + 4);
+      ctx.lineTo(x + 6, y + 4);
+      ctx.lineTo(x, y + 10);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#222';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(line.text, x, y - 7, 230);
+    }
+  }
+
+  /** Recent banter, bottom-left. */
+  private drawChatFeed() {
+    const ctx = this.ctx;
+    const now = Date.now();
+    this.chats = this.chats.filter((c) => c.until > now);
+    const lines = this.chats.slice(-4);
+    ctx.font = '14px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    lines.forEach((line, i) => {
+      const slot = this.slots.find((s) => s.id === line.from);
+      const who = slot ? this.slotLabel(slot) : `Player ${line.from + 1}`;
+      const y = WORLD_H - 14 - (lines.length - 1 - i) * 20;
+      const text = `${who}: ${line.text}`;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      const w = ctx.measureText(text).width;
+      ctx.fillRect(12, y - 16, w + 12, 20);
+      ctx.fillStyle = slot ? slot.color : '#fff';
+      ctx.fillText(who, 18, y);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(`: ${line.text}`, 18 + ctx.measureText(who).width, y);
+    });
+  }
+
+  /** Bottom-center recharge bars for the cannons and the barrel mine. */
+  private drawWeaponBars() {
+    const ship = this.selfSlot?.ship;
+    if (!ship) return;
+    const ctx = this.ctx;
+    const cx = WORLD_W / 2;
+    const y0 = WORLD_H - 40;
+    const segW = 26;
+    const gap = 4;
+
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+
+    // Cannons: one segment per gun, filling as it reloads.
+    const totalW = ship.guns * (segW + gap) - gap;
+    const x0 = cx - totalW / 2;
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.fillText(this.myFireMode === 'volley' ? 'Broadside (F)' : 'Single guns (F)', x0 - 10, y0 + 5);
+    ship.gunReload.forEach((r, i) => {
+      const frac = 1 - Math.min(r / PLAYER_RELOAD, 1);
+      const x = x0 + i * (segW + gap);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.fillRect(x, y0, segW, 10);
+      ctx.fillStyle = frac >= 1 ? '#ffd75e' : 'rgba(255, 215, 94, 0.55)';
+      ctx.fillRect(x, y0, segW * frac, 10);
+    });
+
+    // Barrel mine: a single bar below.
+    const cool = this.selfSlot!.mineCool;
+    const mineFrac = 1 - Math.min(cool / MINE_RECHARGE, 1);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.fillText('Barrel (S)', x0 - 10, y0 + 21);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+    ctx.fillRect(x0, y0 + 16, totalW, 10);
+    ctx.fillStyle = mineFrac >= 1 ? '#e8742c' : 'rgba(232, 116, 44, 0.55)';
+    ctx.fillRect(x0, y0 + 16, totalW * mineFrac, 10);
   }
 
   /** Wind dial top-center: an arrow pointing where the wind blows, plus strength. */

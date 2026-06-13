@@ -225,7 +225,8 @@ await pressUntil(host2, 'Space', () => window.__game.cannonballs.length > 0, 'a 
 const ballCount = await host2.evaluate(() => window.__game.cannonballs.length);
 if (ballCount !== 1) throw new Error(`rolling fire launched ${ballCount} balls from one press`);
 console.log('rolling fire: one gun per press ✓');
-await host2.waitForFunction(() => window.__game.splashes.length > 0, null, { timeout: 5000 });
+// The splash is brief (~0.5s), so poll fast to catch it under throttling.
+await host2.waitForFunction(() => window.__game.splashes.length > 0, null, { timeout: 8000, polling: 50 });
 console.log('cannonball splashed into the sea ✓');
 await pressUntil(host2, 'KeyF', () => window.__game.myFireMode === 'volley', 'volley mode');
 
